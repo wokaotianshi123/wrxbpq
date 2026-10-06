@@ -1,0 +1,16 @@
+# 构建产物
+wrxbpq
+wrxbpq.exe
+wrxbpq-server.exe
+dist/
+.vercel/
+
+# 本地环境
+.env
+.env.local
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
