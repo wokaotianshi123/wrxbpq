@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wrxbpq · XBPQ 规则编写与验证</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>wrxbpq</h1>
+  <span class="sub">输入视频网址 → AI 生成 XBPQ 规则 → 真实播放验证</span>
+</header>
+
+<main>
+  <section class="card">
+    <h2>1 · 目标站点</h2>
+    <div class="row">
+      <input id="site" type="text" placeholder="https://www.example.com" autocomplete="off">
+      <button id="btnProbe" class="ghost">抓取样本</button>
+    </div>
+    <p class="hint">抓取首页 / 分类页 / 详情页 / 播放页样本，供 AI 分析站点结构。</p>
+    <pre id="probeOut" class="out hidden"></pre>
+  </section>
+
+  <section class="card">
+    <h2>2 · AI 配置（OpenAI 兼容）</h2>
+    <div class="grid">
+      <label>BaseURL<input id="baseUrl" type="text" placeholder="https://api.deepseek.com/v1"></label>
+      <label>模型<input id="model" type="text" placeholder="deepseek-chat"></label>
+      <label class="wide">API Key<input id="apiKey" type="password" placeholder="sk-...（仅保存在本机浏览器）"></label>
+    </div>
+    <div class="row">
+      <button id="btnGenerate">生成规则</button>
+      <button id="btnFix" class="ghost" disabled>按验证结果修复</button>
+      <span id="genStatus" class="status"></span>
+    </div>
+    <p class="hint">兼容任何提供 /v1/chat/completions 的服务：OpenAI、DeepSeek、通义、月之暗面、Groq、OpenRouter、One-API、本地 Ollama 等。</p>
+  </section>
+
+  <section class="card">
+    <h2>3 · 规则 JSON</h2>
+    <textarea id="rule" spellcheck="false" placeholder='{ "主页url": "https://..." }'></textarea>
+    <div class="row">
+      <label class="inline">搜索测试词<input id="keyword" type="text" value="爱" size="6"></label>
+      <button id="btnVerify">开始验证</button>
+      <span class="hint inline">验证会逐步执行：解析 → 目录 → 翻页 → 搜索 → 详情 → 播放</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>4 · 验证结果</h2>
+    <div id="steps" class="steps"></div>
+    <div class="row">
+      <button id="btnCopy" class="ghost">复制规则</button>
+      <button id="btnDownload" class="ghost">下载 JSON</button>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span>播放通过标准：直链必须真实返回 <code>#EXTM3U</code> 或 MP4 二进制，仅 HTTP 200 不算通过。</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
