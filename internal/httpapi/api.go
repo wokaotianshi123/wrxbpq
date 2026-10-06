@@ -67,6 +67,7 @@ type generateRequest struct {
 	Site     string      `json:"site"`
 	Rule     string      `json:"rule"`
 	Problems []string    `json:"problems"`
+	Notes    string      `json:"notes"`
 	Samples  []ai.Sample `json:"samples"`
 	BaseURL  string      `json:"baseUrl"`
 	APIKey   string      `json:"apiKey"`
@@ -114,9 +115,9 @@ func HandleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	var messages []ai.Message
 	if strings.TrimSpace(request.Rule) != "" {
-		messages = ai.BuildFixMessages(request.Site, request.Rule, request.Problems, samples)
+		messages = ai.BuildFixMessages(request.Site, request.Rule, request.Problems, samples, request.Notes)
 	} else {
-		messages = ai.BuildGenerateMessages(request.Site, samples)
+		messages = ai.BuildGenerateMessages(request.Site, samples, request.Notes)
 	}
 	content, err := ai.Chat(cfg, messages)
 	if err != nil {

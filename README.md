@@ -130,7 +130,7 @@ BaseURL 只写到 `/v1` 即可，程序会自动补 `/chat/completions`；写全
 |---|---|---|---|
 | GET | `/api/health` | — | 健康检查 |
 | POST | `/api/probe` | `{site, limit?}` | 抓站点样本 |
-| POST | `/api/generate` | `{site, baseUrl, model, apiKey?, rule?, problems?}` | 生成；带 `rule` 则进入修复模式 |
+| POST | `/api/generate` | `{site, baseUrl, model, apiKey?, rule?, problems?, notes?, samples?}` | 生成；带 `rule` 则进入修复模式；`notes` 是给 AI 的补充说明 |
 | POST | `/api/verify` | `{rule, site?, keyword?, detailId?, episode?, steps?}` | 分步验证 |
 
 `/api/verify` 返回：

@@ -76,10 +76,13 @@ const SystemPrompt = `你是一名 TVBox/XBPQ 爬虫规则编写专家。任务�
 6. 若提供了播放页样本，定位直链藏法并写「跳转播放链接」。`
 
 // BuildGenerateMessages 构造生成规则的消息。
-// samples 是若干「标题 + 内容」的页面样本。
-func BuildGenerateMessages(siteURL string, samples []Sample) []Message {
+// samples 是若干「标题 + 内容」的页面样本。notes 是用户补充说明（可空）。
+func BuildGenerateMessages(siteURL string, samples []Sample, notes string) []Message {
 	var builder strings.Builder
 	builder.WriteString("目标站点：" + siteURL + "\n\n")
+	if note := strings.TrimSpace(notes); note != "" {
+		builder.WriteString("用户补充说明（请优先采纳，可能包含站点特性、期望字段等）：\n" + note + "\n\n")
+	}
 	builder.WriteString("以下是该站点的页面 HTML 样本（已裁剪）。请据此产出 XBPQ 规则 JSON。\n")
 	for _, sample := range samples {
 		builder.WriteString("\n===== 样本：" + sample.Label + " =====\n")
@@ -94,7 +97,8 @@ func BuildGenerateMessages(siteURL string, samples []Sample) []Message {
 }
 
 // BuildFixMessages 构造修复规则的消息：把验证失败信息和相关样本回传给模型。
-func BuildFixMessages(siteURL, ruleJSON string, problems []string, samples []Sample) []Message {
+// notes 是用户补充说明（可空），会作为额外修复线索交给模型。
+func BuildFixMessages(siteURL, ruleJSON string, problems []string, samples []Sample, notes string) []Message {
 	var builder strings.Builder
 	builder.WriteString("目标站点：" + siteURL + "\n\n")
 	builder.WriteString("上一版规则：\n" + ruleJSON + "\n\n")
@@ -102,6 +106,9 @@ func BuildFixMessages(siteURL, ruleJSON string, problems []string, samples []Sam
 	for index, problem := range problems {
 		builder.WriteString("- " + problem + "\n")
 		_ = index
+	}
+	if note := strings.TrimSpace(notes); note != "" {
+		builder.WriteString("\n用户补充说明（这是用户对站点/规则的第一手观察，务必优先满足，即使与上面的通用要求冲突）：\n" + note + "\n")
 	}
 	builder.WriteString("\n修复要求：\n")
 	builder.WriteString("1. 对照上面「条目样本」检查 数组/二次截取 的边界是否把 链接/标题 要用的关键串截掉了；数组框住完整条目即可，具体值交给字段截取。\n")

@@ -35,6 +35,10 @@
       <button id="btnFix" class="ghost" disabled>按验证结果修复</button>
       <span id="genStatus" class="status"></span>
     </div>
+    <div class="note-box">
+      <label for="notes">补充说明（可选）：告诉 AI 站点情况或你的期望，生成和修复都会带给它</label>
+      <textarea id="notes" spellcheck="false" rows="2" placeholder="例如：这个站首页有电影/电视剧/综艺/动漫四个分类；列表封面是懒加载 data-original；详情页有多条播放线路；只要输出 JSON 别加解释…"></textarea>
+    </div>
     <p class="hint">兼容任何提供 /v1/chat/completions 的服务：OpenAI、DeepSeek、通义、月之暗面、Groq、OpenRouter、One-API、本地 Ollama 等。</p>
   </section>
 

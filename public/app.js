@@ -28,6 +28,7 @@ function loadConfig() {
     if (saved.baseUrl) $('baseUrl').value = saved.baseUrl;
     if (saved.model) $('model').value = saved.model;
     if (saved.apiKey) $('apiKey').value = saved.apiKey;
+    if (saved.notes) $('notes').value = saved.notes;
   } catch (_) { /* 忽略损坏的本地配置 */ }
 }
 
@@ -36,6 +37,7 @@ function saveConfig() {
     baseUrl: $('baseUrl').value.trim(),
     model: $('model').value.trim(),
     apiKey: $('apiKey').value.trim(),
+    notes: $('notes').value.trim(),
   }));
 }
 
@@ -159,6 +161,7 @@ async function generate(isFix) {
       site,
       rule: isFix ? rule : '',
       problems: isFix ? state.problems : [],
+      notes: $('notes').value.trim(),
       baseUrl: $('baseUrl').value.trim(),
       apiKey: $('apiKey').value.trim(),
       model: $('model').value.trim(),
@@ -274,7 +277,7 @@ $('btnFix').addEventListener('click', () => generate(true));
 $('btnVerify').addEventListener('click', verify);
 $('btnCopy').addEventListener('click', copyRule);
 $('btnDownload').addEventListener('click', downloadRule);
-['baseUrl', 'model', 'apiKey'].forEach((id) => {
+['baseUrl', 'model', 'apiKey', 'notes'].forEach((id) => {
   $(id).addEventListener('change', saveConfig);
 });
 
