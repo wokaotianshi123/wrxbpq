@@ -75,10 +75,11 @@ type generateRequest struct {
 }
 
 type generateResponse struct {
-	OK    bool   `json:"ok"`
-	Rule  string `json:"rule,omitempty"`
-	Raw   string `json:"raw,omitempty"`
-	Error string `json:"error,omitempty"`
+	OK      bool        `json:"ok"`
+	Rule    string      `json:"rule,omitempty"`
+	Raw     string      `json:"raw,omitempty"`
+	Error   string      `json:"error,omitempty"`
+	Samples []ai.Sample `json:"samples,omitempty"`
 }
 
 // HandleGenerate 调 AI 生成（或修复）规则。
@@ -131,7 +132,7 @@ func HandleGenerate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, generateResponse{OK: false, Rule: rule, Raw: content, Error: "AI 产出无法识别为 XBPQ 规则（缺少 主页url/首页url/请求）"})
 		return
 	}
-	writeJSON(w, http.StatusOK, generateResponse{OK: true, Rule: rule, Raw: content})
+	writeJSON(w, http.StatusOK, generateResponse{OK: true, Rule: rule, Raw: content, Samples: samples})
 }
 
 // ExtractRule 从模型回复里剥离 Markdown 代码块与前后废话，取出 JSON。

@@ -56,6 +56,16 @@ const SystemPrompt = `你是一名 TVBox/XBPQ 爬虫规则编写专家。任务�
    注意："url":" 这类短锚点往往不唯一（页面里 maccms 配置也含它），要用更长的上下文。
 4. 分类 ID 不一定是数字：有的站用英文 slug（tv/movie/cartoon），照抄即可。
 5. 分页形态要确认：{catePg} 可能出现在路径（/type/tv/2/）也可能在文件名（/list/1-2.html）。
+6. 【最常见致命错误】数组(start&&end) 的起始锚点不要吃掉后面字段要用的关键串。
+   反例：条目是 <li><a href="/detail/123/" title="片名">…</a>…</li>
+   数组写成 "<li><a href=\"/detail/&&</a>" 会把 href= 截掉，导致 "链接":"href=\"&&\""
+   在所有条目里都取不到值，目录/搜索/详情/播放全部连锁失败（表现为"抽取到 N 个条目但 0 条可用"）。
+   正解：数组用外层完整边界 "<li>&&</li>"，让 href、title 留在条目内，由 链接/标题 字段各自截取。
+   口诀：数组只管"框住一个条目"，具体值一律交给 标题/链接/图片 字段去截。
+7. 【播放段高频坑】播放数组 的起始锚点不要带闭合的 >：真实标签常带额外属性
+   （如 <div class="row" style="display: block;">），写 "<div class=\"row\">&&</div>" 会匹配不上。
+   正解：写成 "<div class=\"row\"&&</div>"（去掉 >），只框住标签开头。
+   同理，只有站点确实存在多条播放线路时才写 线路数组；单线路站写了会拆出重复线路。
 
 # 工作流程
 1. 从首页样本里找出导航中的分类链接，推断分类 ID 与分类页 URL 形态。
@@ -88,11 +98,16 @@ func BuildFixMessages(siteURL, ruleJSON string, problems []string, samples []Sam
 	var builder strings.Builder
 	builder.WriteString("目标站点：" + siteURL + "\n\n")
 	builder.WriteString("上一版规则：\n" + ruleJSON + "\n\n")
-	builder.WriteString("验证发现以下问题（必须修掉）：\n")
+	builder.WriteString("验证发现以下问题（必须逐条修掉，修不了说明原因）：\n")
 	for index, problem := range problems {
 		builder.WriteString("- " + problem + "\n")
 		_ = index
 	}
+	builder.WriteString("\n修复要求：\n")
+	builder.WriteString("1. 对照上面「条目样本」检查 数组/二次截取 的边界是否把 链接/标题 要用的关键串截掉了；数组框住完整条目即可，具体值交给字段截取。\n")
+	builder.WriteString("2. 若问题出在 detail/play 步骤，对照「详情页样本」里分集容器的真实 HTML 重写 播放数组/播放列表/播放标题/播放链接；播放数组 起始锚点不要带闭合的 >（真实标签常带 style= 等额外属性）。单线路站不要写 线路数组。\n")
+	builder.WriteString("3. 只改有问题的字段，其它字段保持原样，输出修正后的完整规则。\n")
+	builder.WriteString("4. 只输出 JSON，不要解释。\n")
 	if len(samples) > 0 {
 		builder.WriteString("\n相关页面样本：\n")
 		for _, sample := range samples {

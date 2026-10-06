@@ -258,9 +258,107 @@ func (e *Engine) Catalog(ctx context.Context, categoryID string, page int) ([]Dr
 		})
 	}
 	if len(dramas) == 0 {
-		return nil, fmt.Errorf("规则抽取的条目缺少标题或链接")
+		return nil, fmt.Errorf("抽取到 %d 个条目但全部被丢弃：%s", len(items), e.diagnoseItems(items, prefix, pageURL))
 	}
 	return dramas, nil
+}
+
+// diagnoseItems 说明条目为何被丢弃，并给出第一个条目的样本，供 AI 修复规则时定位问题。
+// 覆盖最常见的两类错误：起始锚点吃掉了 href（链接取不到）、标题锚点不匹配。
+func (e *Engine) diagnoseItems(items []item, prefix, pageURL string) string {
+	if len(items) == 0 {
+		return "没有条目"
+	}
+	first := items[0].text
+	titlePattern := e.Rule.Field(prefix+"标题", "标题")
+	linkPattern := e.Rule.Field(prefix+"链接", "链接")
+	var reason []string
+	if CleanText(itemField(items[0], titlePattern)) == "" {
+		reason = append(reason, fmt.Sprintf("标题 pattern %q 在条目里取不到值", titlePattern))
+	}
+	if link := JoinLink(pageURL, itemField(items[0], linkPattern)); link == "" || !strings.HasPrefix(link, "http") {
+		reason = append(reason, fmt.Sprintf("链接 pattern %q 在条目里取不到 http 链接（若 数组 起始锚点已吃掉 href=，请改用只到 <li> 的边界，把 href 留给 链接 字段）", linkPattern))
+	}
+	clause := strings.Join(reason, "；")
+	if clause == "" {
+		clause = "标题/链接看似能取，但补全后不是 http 绝对链接"
+	}
+	return clause + "。第一个条目样本：" + clip(first, 220)
+}
+
+func clip(s string, limit int) string {
+	runes := []rune(strings.TrimSpace(s))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit]) + "…"
+}
+
+// diagnoseEpisodes 说明详情页为何解析不到分集：
+// 覆盖播放数组锚点不匹配（最常见：起始锚点带 > 而真实标签带额外属性）、播放链接/播放标题取不到值，
+// 并给出页面真实片段样本，供 AI 修复规则时直接对照。
+func (e *Engine) diagnoseEpisodes(body, pageURL string) string {
+	arrayPattern := e.Rule.Field("播放数组")
+	if arrayPattern == "" {
+		return "规则缺少 播放数组 字段"
+	}
+	region := CutOnce(body, arrayPattern)
+	if region == "" {
+		if start, _, found := strings.Cut(arrayPattern, "&&"); found {
+			start = strings.TrimSpace(start)
+			// 先用锚点去掉尾部 > 后的前缀精确定位（<div class="row"> → <div class="row"），
+			// 找不到再退回标签名级别探测。
+			probeKey := strings.TrimSuffix(start, ">")
+			if probeKey == "" || strings.Index(body, probeKey) < 0 {
+				probeKey = firstTagOf(start)
+			}
+			if probeKey != "" {
+				if at := strings.Index(body, probeKey); at >= 0 {
+					limit := at + 240
+					if limit > len(body) {
+						limit = len(body)
+					}
+					return fmt.Sprintf("播放数组 pattern %q 在详情页取不到内容；页面中该容器的真实形态如下（注意起始锚点若写成带 > 的精确串，会因真实标签带 style= 等额外属性而匹配不上，应去掉 > 只框住标签开头）：%s",
+						arrayPattern, clip(body[at:limit], 220))
+				}
+			}
+		}
+		return fmt.Sprintf("播放数组 pattern %q 在详情页完全取不到内容，请核对分集容器的真实 HTML", arrayPattern)
+	}
+	listSplit := e.Rule.Field("播放列表")
+	if listSplit == "" || listSplit == "&&" {
+		listSplit = "#"
+	}
+	parts := strings.Split(strings.ReplaceAll(region, "\r\n", "#"), listSplit)
+	sample := ""
+	if len(parts) > 0 {
+		sample = clip(parts[len(parts)/2], 180)
+	}
+	linkPattern := e.Rule.Field("播放链接")
+	if linkPattern != "" && CutOnce(region, linkPattern) == "" {
+		return fmt.Sprintf("播放数组 能取到分集区域，但 播放链接 pattern %q 取不到值。分集片段样本：%s", linkPattern, sample)
+	}
+	titlePattern := e.Rule.Field("播放标题")
+	if titlePattern != "" && len(parts) > 2 && CutOnce(parts[len(parts)/2], titlePattern) == "" {
+		return fmt.Sprintf("播放数组/播放列表 拆出 %d 段，但 播放标题 pattern %q 在片段里取不到值。分集片段样本：%s", len(parts), titlePattern, sample)
+	}
+	return fmt.Sprintf("播放数组 取到了内容但按 播放列表=%q 拆不出有效分集（共 %d 段）。分集片段样本：%s", listSplit, len(parts), sample)
+}
+
+// firstTagOf 取出锚点里第一个 <xxx 标签起始（截止到属性空格或 >），用于在页面里探测真实形态。
+func firstTagOf(s string) string {
+	index := strings.Index(s, "<")
+	if index < 0 {
+		return ""
+	}
+	end := index + 1
+	for end < len(s) && s[end] != '>' && s[end] != ' ' {
+		end++
+	}
+	if end-index < 3 {
+		return ""
+	}
+	return s[index:end]
 }
 
 // ---- 搜索 ----
@@ -299,7 +397,7 @@ func (e *Engine) Search(ctx context.Context, query string) ([]Drama, error) {
 			}
 			dramas := e.itemsToCatalog(pageURL, items, "搜索")
 			if len(dramas) == 0 {
-				lastErr = fmt.Errorf("搜索结果缺少标题或链接")
+				lastErr = fmt.Errorf("搜索抽取到 %d 个条目但全部被丢弃：%s", len(items), e.diagnoseItems(items, "搜索", pageURL))
 				continue
 			}
 			return dramas, nil
@@ -351,6 +449,9 @@ func (e *Engine) Detail(ctx context.Context, sourceID string) (Drama, []Chapter,
 		pageURL = RenderURL(e.Rule.Field("详情url", "详情页url"), e.Base, map[string]string{"id": sourceID})
 	}
 	if pageURL == "" || !strings.HasPrefix(pageURL, "http") {
+		if e.Rule.Field("详情url", "详情页url") == "" {
+			return Drama{}, nil, fmt.Errorf("无法定位详情页地址：条目 ID %q 不是完整链接且规则缺少 详情url 字段（请补上如 \"详情url\": \"https://site/detail/{id}/\"）", sourceID)
+		}
 		return Drama{}, nil, fmt.Errorf("无法定位详情页地址")
 	}
 	body, err := e.Fetcher.Get(ctx, pageURL, e.Base+"/")
@@ -417,7 +518,7 @@ func (e *Engine) Detail(ctx context.Context, sourceID string) (Drama, []Chapter,
 	}
 	episodes, routeGroups := e.episodes(body, pageURL)
 	if len(episodes) == 0 {
-		return Drama{}, nil, fmt.Errorf("规则未解析到分集")
+		return Drama{}, nil, fmt.Errorf("未解析到分集：%s", e.diagnoseEpisodes(body, pageURL))
 	}
 	var chapters []Chapter
 	for index, one := range episodes {
