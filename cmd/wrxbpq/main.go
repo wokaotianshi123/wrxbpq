@@ -209,8 +209,13 @@ func printResults(results []verify.StepResult) {
 		mark := "✓"
 		if !result.OK {
 			mark = "✗"
+		} else if result.Warning != "" {
+			mark = "△"
 		}
 		fmt.Printf("%s %-8s %s\n", mark, result.Step, result.Message)
+		if result.Warning != "" {
+			fmt.Printf("          警告：%s\n", result.Warning)
+		}
 		if result.Error != "" {
 			fmt.Printf("          错误：%s\n", result.Error)
 		}

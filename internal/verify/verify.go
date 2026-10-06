@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -112,6 +113,7 @@ type StepResult struct {
 	Step    string           `json:"step"`
 	OK      bool             `json:"ok"`
 	Message string           `json:"message"`
+	Warning string           `json:"warning,omitempty"`
 	Details map[string]any   `json:"details,omitempty"`
 	Rows    []map[string]any `json:"rows,omitempty"`
 	Error   string           `json:"error,omitempty"`
@@ -431,16 +433,49 @@ func stepPlay(ctx context.Context, engine *xbpq.Engine, opts Options, chapter *x
 			return result
 		}
 		result.Details["HTTP状态"] = status
-		result.Details["响应头"] = head
-		if !strings.Contains(head, "#EXTM3U") && !strings.HasPrefix(head, "\x00\x00\x00") {
+		result.Details["响应头"] = clipString(head, 400)
+		switch classifyProbe(status, head) {
+		case outcomeMedia:
+			result.Message = fmt.Sprintf("第 %d 集可播（HTTP %d，返回 %s）", target.Index, status, mediaKind(head))
+		case outcomeBlocked:
+			// 直链取回了 403/地域拒绝：区分"服务器被 CDN 地域封禁"与"规则真的有问题"。
+			// Vercel 部署在境外机房，国内采集站 CDN 常返回 403 "region denied"，
+			// 但直链能被规则解出且形态合法，说明规则没问题（浏览器/国内网络实测能播即为证），降级为警告。
+			result.Warning = fmt.Sprintf("CDN 拒绝了本机（服务器）IP 的请求（HTTP %d，多为境外机房被国内 CDN 地域封锁或防盗链所致）。这不代表规则有问题——请在浏览器或国内设备上实测播放。", status)
+			result.Message = fmt.Sprintf("第 %d 集解析到直链，但服务器所在地无法验证可播（地域封锁/防盗链）", target.Index)
+		default:
 			result.OK = false
-			result.Error = "响应内容不是 m3u8/mp4（可能是 HTML 错误页）"
+			result.Error = fmt.Sprintf("响应内容不是 m3u8/mp4（HTTP %d，可能是 HTML 错误页）", status)
 			result.Message = "直链内容异常"
-			return result
 		}
-		result.Message = fmt.Sprintf("第 %d 集可播（HTTP %d，返回 %s）", target.Index, status, mediaKind(head))
+		return result
 	}
 	return result
+}
+
+// probeOutcome 是直链探测的归类结果。
+type probeOutcome int
+
+const (
+	outcomeBad probeOutcome = iota
+	outcomeMedia
+	outcomeBlocked
+)
+
+// classifyProbe 判断直链回包：真媒体 / 被地域或防盗链拦截 / 其它异常。
+func classifyProbe(status int, head string) probeOutcome {
+	if strings.Contains(head, "#EXTM3U") || strings.HasPrefix(head, "\x00\x00\x00") || strings.Contains(head, "ftyp") {
+		return outcomeMedia
+	}
+	lower := strings.ToLower(head)
+	// 403/451 状态，或正文含 Forbidden / region ... denied / 地域 等封锁信号。
+	if status == http.StatusForbidden || status == http.StatusUnavailableForLegalReasons ||
+		strings.Contains(head, "Forbidden") || strings.Contains(lower, "denied") ||
+		strings.Contains(lower, "region") && strings.Contains(lower, "deny") ||
+		strings.Contains(head, "禁止") || strings.Contains(head, "地域") {
+		return outcomeBlocked
+	}
+	return outcomeBad
 }
 
 // probeMedia 真正请求直链，只取前若干字节判断是否真是 m3u8/mp4。
@@ -452,8 +487,13 @@ func probeMedia(ctx context.Context, address, referer string) (int, string, erro
 		return 0, "", err
 	}
 	request.Header.Set("User-Agent", xbpq.DefaultUserAgent)
+	request.Header.Set("Accept", "*/*")
+	request.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	if referer != "" {
 		request.Header.Set("Referer", referer)
+		if origin := originOf(referer); origin != "" {
+			request.Header.Set("Origin", origin)
+		}
 	}
 	request.Header.Set("Range", "bytes=0-2047")
 	response, err := http.DefaultClient.Do(request)
@@ -463,6 +503,15 @@ func probeMedia(ctx context.Context, address, referer string) (int, string, erro
 	defer response.Body.Close()
 	payload, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
 	return response.StatusCode, string(payload), nil
+}
+
+// originOf 从 referer 提取 scheme://host 作为 Origin 头（播放器请求常带）。
+func originOf(referer string) string {
+	parsed, err := url.Parse(referer)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
 }
 
 func mediaKind(head string) string {

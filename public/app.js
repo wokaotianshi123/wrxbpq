@@ -78,9 +78,15 @@ function renderSteps() {
 function paintStep(result) {
   const box = $('step-' + result.step);
   if (!box) return;
-  box.className = 'step ' + (result.ok ? 'ok' : 'bad');
+  // 三种状态：失败 bad / 通过但有警告 warn（如 CDN 地域封锁）/ 通过 ok
+  const cls = !result.ok ? 'bad' : (result.warning ? 'warn' : 'ok');
+  box.className = 'step ' + cls;
   box.innerHTML = `<div class="name">${STEP_NAMES[result.step] || result.step}</div>
     <div class="msg">${escapeHTML(result.message || '')}</div>`;
+  if (result.warning) {
+    box.insertAdjacentHTML('beforeend',
+      `<div class="detail warn-text">⚠ ${escapeHTML(result.warning)}</div>`);
+  }
   if (result.error) {
     box.querySelector('.msg').insertAdjacentHTML('afterend',
       `<div class="detail">错误：${escapeHTML(result.error)}</div>`);
