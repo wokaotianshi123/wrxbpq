@@ -68,6 +68,8 @@ const SystemPrompt = `你是一名 TVBox/XBPQ 爬虫规则编写专家。任务�
    同理，只有站点确实存在多条播放线路时才写 线路数组；单线路站写了会拆出重复线路。
 
 # 工作流程
+0. 若消息里给出【站点指纹】：它是服务端从真实页面解析并核实过出现次数的锚点，
+   pattern 一律逐字符照抄指纹（含空格引号），只有指纹没覆盖的字段才回样本里逐字复制。
 1. 从首页样本里找出导航中的分类链接，推断分类 ID 与分类页 URL 形态。
 2. 找分页链接，确认页码占位符位置。
 3. 找列表条目容器，确定「数组」与「二次截取」。
@@ -76,14 +78,20 @@ const SystemPrompt = `你是一名 TVBox/XBPQ 爬虫规则编写专家。任务�
 6. 若提供了播放页样本，定位直链藏法并写「跳转播放链接」。`
 
 // BuildGenerateMessages 构造生成规则的消息。
-// samples 是若干「标题 + 内容」的页面样本。notes 是用户补充说明（可空）。
-func BuildGenerateMessages(siteURL string, samples []Sample, notes string) []Message {
+// samples 是若干「标题 + 内容」的页面样本；notes 是用户补充说明（可空）；
+// siteFingerprint 是服务端核实过的锚点指纹（可空），有它时以指纹为准。
+func BuildGenerateMessages(siteURL string, samples []Sample, notes, siteFingerprint string) []Message {
 	var builder strings.Builder
 	builder.WriteString("目标站点：" + siteURL + "\n\n")
 	if note := strings.TrimSpace(notes); note != "" {
 		builder.WriteString("用户补充说明（请优先采纳，可能包含站点特性、期望字段等）：\n" + note + "\n\n")
 	}
-	builder.WriteString("以下是该站点的页面 HTML 样本（已裁剪）。请据此产出 XBPQ 规则 JSON。\n")
+	if fp := strings.TrimSpace(siteFingerprint); fp != "" {
+		builder.WriteString(fp + "\n\n")
+		builder.WriteString("请优先按上面的站点指纹写 pattern，样本仅作指纹未覆盖字段的补充参考。\n")
+	} else {
+		builder.WriteString("以下是该站点的页面 HTML 样本（已裁剪）。请据此产出 XBPQ 规则 JSON。\n")
+	}
 	for _, sample := range samples {
 		builder.WriteString("\n===== 样本：" + sample.Label + " =====\n")
 		builder.WriteString(sample.Content)
@@ -97,8 +105,9 @@ func BuildGenerateMessages(siteURL string, samples []Sample, notes string) []Mes
 }
 
 // BuildFixMessages 构造修复规则的消息：把验证失败信息和相关样本回传给模型。
-// notes 是用户补充说明（可空），会作为额外修复线索交给模型。
-func BuildFixMessages(siteURL, ruleJSON string, problems []string, samples []Sample, notes string) []Message {
+// notes 是用户补充说明（可空），会作为额外修复线索交给模型；
+// siteFingerprint 非空时作为锚点权威来源，防止修复时再次抄错 HTML。
+func BuildFixMessages(siteURL, ruleJSON string, problems []string, samples []Sample, notes, siteFingerprint string) []Message {
 	var builder strings.Builder
 	builder.WriteString("目标站点：" + siteURL + "\n\n")
 	builder.WriteString("上一版规则：\n" + ruleJSON + "\n\n")
@@ -109,6 +118,9 @@ func BuildFixMessages(siteURL, ruleJSON string, problems []string, samples []Sam
 	}
 	if note := strings.TrimSpace(notes); note != "" {
 		builder.WriteString("\n用户补充说明（这是用户对站点/规则的第一手观察，务必优先满足，即使与上面的通用要求冲突）：\n" + note + "\n")
+	}
+	if fp := strings.TrimSpace(siteFingerprint); fp != "" {
+		builder.WriteString("\n" + fp + "\n")
 	}
 	builder.WriteString("\n修复要求：\n")
 	builder.WriteString("1. 对照上面「条目样本」检查 数组/二次截取 的边界是否把 链接/标题 要用的关键串截掉了；数组框住完整条目即可，具体值交给字段截取。\n")

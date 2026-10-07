@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/wrxbpq/wrxbpq/internal/ai"
+	"github.com/wrxbpq/wrxbpq/internal/fingerprint"
 	"github.com/wrxbpq/wrxbpq/internal/verify"
 	"github.com/wrxbpq/wrxbpq/internal/xbpq"
 )
@@ -114,10 +115,11 @@ func HandleGenerate(w http.ResponseWriter, r *http.Request) {
 		samples = probed
 	}
 	var messages []ai.Message
+	siteFingerprint := fingerprint.Analyze(samples)
 	if strings.TrimSpace(request.Rule) != "" {
-		messages = ai.BuildFixMessages(request.Site, request.Rule, request.Problems, samples, request.Notes)
+		messages = ai.BuildFixMessages(request.Site, request.Rule, request.Problems, samples, request.Notes, siteFingerprint)
 	} else {
-		messages = ai.BuildGenerateMessages(request.Site, samples, request.Notes)
+		messages = ai.BuildGenerateMessages(request.Site, samples, request.Notes, siteFingerprint)
 	}
 	content, err := ai.Chat(cfg, messages)
 	if err != nil {
@@ -132,6 +134,22 @@ func HandleGenerate(w http.ResponseWriter, r *http.Request) {
 	if _, ok := xbpq.ParseRule(rule); !ok {
 		writeJSON(w, http.StatusOK, generateResponse{OK: false, Rule: rule, Raw: content, Error: "AI 产出无法识别为 XBPQ 规则（缺少 主页url/首页url/请求）"})
 		return
+	}
+	// 格式自检：锚点一字未现、缺 &&、字面 \" 这类确定性错误直接回喂 AI 自动修一轮，
+	// 省掉用户"验证→修复"的一个来回。
+	if issues := fingerprint.Check(rule, samples); len(issues) > 0 {
+		var problems []string
+		for _, issue := range issues {
+			problems = append(problems, "字段「"+issue.Field+"」："+issue.Problem)
+		}
+		retryMessages := ai.BuildFixMessages(request.Site, rule, problems, samples, request.Notes, siteFingerprint)
+		if retryContent, retryErr := ai.Chat(cfg, retryMessages); retryErr == nil {
+			if retried := ExtractRule(retryContent); retried != "" {
+				if _, retryOK := xbpq.ParseRule(retried); retryOK && len(fingerprint.Check(retried, samples)) < len(issues) {
+					rule = retried
+				}
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, generateResponse{OK: true, Rule: rule, Raw: content, Samples: samples})
 }

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/wrxbpq/wrxbpq/internal/ai"
+	"github.com/wrxbpq/wrxbpq/internal/fingerprint"
 	"github.com/wrxbpq/wrxbpq/internal/httpapi"
 	"github.com/wrxbpq/wrxbpq/internal/verify"
 	"github.com/wrxbpq/wrxbpq/internal/xbpq"
@@ -122,14 +123,15 @@ func runGenerate(args []string) error {
 		fmt.Printf("  ✓ %s\n", sample.Label)
 	}
 	var messages []ai.Message
+	siteFingerprint := fingerprint.Analyze(samples)
 	if strings.TrimSpace(*rule) != "" {
 		raw, readErr := os.ReadFile(*rule)
 		if readErr != nil {
 			return readErr
 		}
-		messages = ai.BuildFixMessages(*site, string(raw), nil, samples, *note)
+		messages = ai.BuildFixMessages(*site, string(raw), nil, samples, *note, siteFingerprint)
 	} else {
-		messages = ai.BuildGenerateMessages(*site, samples, *note)
+		messages = ai.BuildGenerateMessages(*site, samples, *note, siteFingerprint)
 	}
 	fmt.Println("正在调用 AI…")
 	content, err := ai.Chat(ai.Config{BaseURL: *baseURL, APIKey: *apiKey, Model: *model, Timeout: *timeout}, messages)

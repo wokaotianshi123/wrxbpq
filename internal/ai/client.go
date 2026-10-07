@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -70,6 +72,27 @@ func NormalizeBaseURL(raw string) string {
 	}
 }
 
+// clientFor 构造 HTTP 客户端。若目标是回环地址（本地 Ollama / vLLM / one-api 网关 / 测试桩），
+// 强制绕过系统代理——Windows 上"局域网与本机地址使用代理"或 NO_PROXY 未配时，
+// 默认代理会把 127.0.0.1 请求转给上游导致连接失败。
+func clientFor(endpoint string, timeout int) *http.Client {
+	client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return client
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		// fallthrough
+	} else if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return client
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	client.Transport = transport
+	return client
+}
+
 // Chat 发起一轮对话，返回助手回复文本。
 func Chat(cfg Config, messages []Message) (string, error) {
 	endpoint := NormalizeBaseURL(cfg.BaseURL)
@@ -99,7 +122,7 @@ func Chat(cfg Config, messages []Message) (string, error) {
 	if strings.TrimSpace(cfg.APIKey) != "" {
 		request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(cfg.APIKey))
 	}
-	client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
+	client := clientFor(endpoint, timeout)
 	response, err := client.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("调用 AI 接口失败: %w", err)
