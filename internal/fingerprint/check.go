@@ -33,8 +33,12 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 		if pattern == "" {
 			continue
 		}
+		// json 模式（j: 前缀）不需要 && 与 HTML 锚点（笔记 item 7）。
+		if strings.HasPrefix(pattern, "j:") {
+			continue
+		}
 		if !strings.Contains(pattern, "&&") && !strings.HasPrefix(pattern, "p:") && !strings.HasPrefix(pattern, "jsoup:") {
-			add(name, "缺少 && 分隔符，XBPQ 截取语法必须是 start&&end（或单侧 A&& / &&B）")
+			add(name, "缺少 && 分隔符，XBPQ 截取语法必须是 start&&end（或单侧 A&& / &&B）；JSON 接口站可用 j: 前缀 json 模式")
 		}
 		if strings.Contains(pattern, "&&&") {
 			add(name, "出现 &&& 三连串，若是多步链 start&&mid&&end 请确认中间锚点在页面里真实存在，否则删掉多余 &")
@@ -51,14 +55,51 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 
 	if route := rule.Field("线路数组"); route != "" {
 		if play := rule.Field("播放数组"); play != "" && sameStart(route, play) {
-			add("线路数组", "线路数组 与 播放数组 起始锚点相同：会把同一线路的每一行拆成重复\"线路\"，单线路站必须删除 线路数组（多线路的锚点应是每条线路的容器标题行）")
+			// 多线路站（详情页出现 ≥2 个「播放线路 N」标题）里 线路数组==播放数组 是正确写法；
+			// 只有确认单线路时才报"拆重复线路"。
+			detail := pick(samples, "详情页")
+			routeTitles := routeTitlePattern.FindAllString(detail, -1)
+			if len(routeTitles) < 2 {
+				add("线路数组", "线路数组 与 播放数组 起始锚点相同且样本未见多线路标题：会把同一线路的每一行拆成重复\"线路\"，单线路站必须删除 线路数组（多线路的锚点应是每条线路的容器标题行）")
+			}
+		}
+	}
+
+	// 提取合理性：数组+链接 组合喂给真实截取引擎，截出值"全是裸 ID"（无 / 无 http）说明
+	// 锚点吃掉了路径前缀（如 href="/vod/&&.html"），拼出的链接全坏——静态锚点校验发现不了这种。
+	if catalog := pick(samples, "分类页"); catalog != "" {
+		if arr := rule.Field("数组"); arr != "" && !strings.HasPrefix(arr, "p:") && strings.Contains(arr, "&&") {
+			entries := xbpq.List(catalog, arr)
+			if len(entries) >= 3 {
+				link := rule.Field("链接")
+				if link != "" && !strings.HasPrefix(link, "p:") {
+					bare, good := 0, 0
+					for _, entry := range entries {
+						value := strings.TrimSpace(xbpq.CutOnce(entry, link))
+						if value == "" {
+							continue
+						}
+						if strings.HasPrefix(value, "http") || (strings.HasPrefix(value, "/") && len(value) > 1) {
+							good++
+						} else {
+							bare++
+						}
+					}
+					if good == 0 && bare >= 3 {
+						add("链接", "按 数组 截出的条目用 链接=\""+clipToken(link, 40)+"\" 只能取到裸 ID（如 55560），拼不成可跳转链接——把 /vod/ 之类路径前缀从锚点里去掉，逐字用 \"href=\\\"&&\\\"\"")
+					}
+				}
+			} else if len(entries) == 0 {
+				// 锚点存在（过了上面的逐字校验）但组合截不出条目
+				add("数组", "起始锚点在样本存在，但 \""+clipToken(arr, 40)+"\" 在分类页样本里截不出任何条目：检查结束锚点是否把条目框断了，或改用样本中真实成对出现的边界")
+			}
 		}
 	}
 
 	// 锚点在样本里核实：字段 pattern 的起始锚点若所有样本文档一字未现 → 大概率是 AI 改写/记错了 HTML
 	for _, name := range []string{"数组", "标题", "链接", "列表图片", "播放数组", "播放标题", "播放链接", "跳转播放链接"} {
 		pattern := rule.Field(name)
-		if pattern == "" || strings.HasPrefix(pattern, "p:") || strings.HasPrefix(pattern, "jsoup:") {
+		if pattern == "" || strings.HasPrefix(pattern, "p:") || strings.HasPrefix(pattern, "jsoup:") || strings.HasPrefix(pattern, "j:") {
 			continue
 		}
 		start := strings.TrimSpace(strings.SplitN(strings.SplitN(pattern, "&&", 2)[0], "||", 2)[0])

@@ -72,6 +72,21 @@ func (e *Engine) extractItems(ctx context.Context, pageURL, prefix string) []ite
 		return nil
 	}
 	arrayPattern := e.Rule.Field(prefix+"数组", "数组")
+	// json 模式数组（笔记 item 7）：二次截取先按路径缩小，数组按路径迭代元素。
+	if arrayPattern != "" && strings.HasPrefix(arrayPattern, "j:") {
+		if region := e.Rule.Field(prefix+"二次截取", "二次截取"); region != "" && isJSONPattern(region) {
+			if scoped := jsonPathRaw(body, region); scoped != "" {
+				body = scoped
+			}
+		}
+		var items []item
+		for _, one := range jsonArrayItems(body, arrayPattern) {
+			items = append(items, item{text: one})
+		}
+		if len(items) > 0 {
+			return items
+		}
+	}
 	if arrayPattern == "" {
 		if jsonItems := jsonList(body); len(jsonItems) > 0 {
 			return jsonItems
@@ -181,6 +196,13 @@ func itemField(entry item, pattern string) string {
 			return ""
 		}
 		return SelectorFirstString(entry.text, pattern)
+	}
+	if strings.HasPrefix(pattern, "j:") || (json.Valid([]byte(entry.text)) && isJSONPattern(pattern)) {
+		if entry.text != "" && json.Valid([]byte(entry.text)) {
+			if value := jsonStringValue(entry.text, pattern); value != "" {
+				return value
+			}
+		}
 	}
 	if strings.Contains(pattern, `"`) && strings.Contains(entry.text, "{") && json.Valid([]byte(entry.text)) {
 		if value := jsonField(entry.text, pattern); value != "" {

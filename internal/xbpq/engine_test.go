@@ -234,3 +234,77 @@ func TestDecodeBodyGBK(t *testing.T) {
 func itoa(value int) string {
 	return string(rune('0' + value))
 }
+
+func TestCutWildcardAnchor(t *testing.T) {
+	// 起始锚点里的 * 通配任意字符（一个字段仅一个通配符）。
+	source := `<video controls="true" src="https://cdn/x.m3u8">`
+	if got := CutOnce(source, `<video controls="true*src="&&"`); got != "https://cdn/x.m3u8" {
+		t.Fatalf("通配符起始锚点失败: %q", got)
+	}
+	if got := CutOnce(`<h3 class="t">剧名</h3>`, `<h*>&&</h`); got != "剧名" {
+		t.Fatalf("<h*> 通配符失败: %q", got)
+	}
+}
+
+func TestCutEscape(t *testing.T) {
+	// 笔记范例：截取 href="?cat&token=5543tdd57" 里的 token，
+	// 转义写法 href="?cat\&&&"（\&& 中的首个 && 被 \ 吃掉一个 &，剩下 & 拼回字面）。
+	source := `href="?cat&token=5543tdd57"`
+	if got := CutOnce(source, `href="?cat\&&&"`); got != "token=5543tdd57" {
+		t.Fatalf("转义 && 截取失败: %q", got)
+	}
+}
+
+func TestCutPlusConcat(t *testing.T) {
+	// 截取段 + 字面段 拼接：把 /vod/123.html 变成 /play/123-1-1.html
+	source := `<a href="/vod/123.html">x</a>`
+	if got := CutOnce(source, `/play/+href="/vod/&&.html+-1-1.html`); got != "/play/123-1-1.html" {
+		t.Fatalf("+ 拼接失败: %q", got)
+	}
+	// 字面前缀 + 截取
+	if got := CutOnce(source, `https://host+href="&&"`); got != "https://host/vod/123.html" {
+		t.Fatalf("+ 前缀拼接失败: %q", got)
+	}
+}
+
+func TestListOrderModifier(t *testing.T) {
+	source := `<div class="line">腾腾线路</div><div class="line">自建蓝光</div><div class="line">优优线路</div>`
+	items := List(source, `<div class="line">&&</div>[排序:自建蓝光>腾腾>优优]`)
+	if len(items) != 3 {
+		t.Fatalf("排序模式条目数 = %d", len(items))
+	}
+	if items[0] != "自建蓝光" || items[1] != "腾腾线路" || items[2] != "优优线路" {
+		t.Fatalf("[排序:] 未生效: %v", items)
+	}
+}
+
+func TestAbbreviatedRuleGetsTemplates(t *testing.T) {
+	// 简写规则（笔记范例 + XBPQ.json 61% 实战形态）：只有 分类url+分类，无主页url。
+	rule, ok := ParseRule(`{"分类url":"https://www.6789ysw.com/index.php/vod/show/area/{area}/id/{cateId}/page/{catePg}/year/{year}.html","分类":"电影$1#电视剧$2"}`)
+	if !ok {
+		t.Fatal("简写规则应被识别为 XBPQ 规则")
+	}
+	if rule.HomeURL() != "https://www.6789ysw.com" {
+		t.Fatalf("简写规则主页应从分类url推导: %q", rule.HomeURL())
+	}
+	if rule.Field("数组") == "" || rule.Field("链接") == "" {
+		t.Fatalf("模板未补齐核心字段: 数组=%q 链接=%q", rule.Field("数组"), rule.Field("链接"))
+	}
+	if rule.Field("播放数组") == "" {
+		t.Fatal("模板未补齐 播放数组")
+	}
+	// 搜索默认值应填好 host
+	if !strings.HasPrefix(rule.Field("搜索url"), "https://www.6789ysw.com/") {
+		t.Fatalf("搜索url 模板未实例化 host: %q", rule.Field("搜索url"))
+	}
+	// 已写字段不被覆盖
+	rule2, _ := ParseRule(`{"分类url":"https://a.com/vodshow/{cateId}---.html","数组":"自定义&&边界","主页url":"https://a.com"}`)
+	if rule2.Field("数组") != "自定义&&边界" {
+		t.Fatalf("模板覆盖了用户已写字段: %q", rule2.Field("数组"))
+	}
+	// 非模板形态不乱补
+	rule3, _ := ParseRule(`{"主页url":"https://a.com","分类url":"https://a.com/weird/{cateId}.html"}`)
+	if rule3.declaresField("数组") {
+		t.Fatal("未知形态不应强补 数组")
+	}
+}

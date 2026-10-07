@@ -88,10 +88,13 @@ func ParseRule(text string) (Rule, bool) {
 	default:
 		return Rule{}, false
 	}
-	if fields["主页url"] == "" && fields["首页url"] == "" && fields["请求"] == "" {
+	if fields["主页url"] == "" && fields["首页url"] == "" && fields["请求"] == "" &&
+		fields["分类url"] == "" && fields["分类Url"] == "" {
 		return Rule{}, false
 	}
-	return Rule{fields: fields, order: order}, true
+	rule := Rule{fields: fields, order: order}
+	rule.applyTemplate()
+	return rule, true
 }
 
 func stringValue(value any) string {
@@ -170,6 +173,15 @@ func (r Rule) Field(names ...string) string {
 // HomeURL 站源主页地址（归一化为 scheme://host/path，无 query/fragment）。
 func (r Rule) HomeURL() string {
 	value := r.Field("主页url", "首页url", "请求")
+	if value == "" {
+		// 简写规则：主页取 分类url/搜索url 的站点根。
+		for _, alt := range []string{"分类url", "分类Url", "搜索url"} {
+			if category := r.Field(alt); strings.HasPrefix(category, "http") {
+				value = hostOrigin(category)
+				break
+			}
+		}
+	}
 	if value == "" {
 		return ""
 	}
@@ -286,7 +298,47 @@ func (r Rule) CategoryURL(base, categoryID string, page int) string {
 	if primary, _, hasSecond := strings.Cut(template, "#"); hasSecond && strings.Contains(template, "二级") {
 		template = primary
 	}
-	return RenderURL(template, base, values)
+	return r.cleanEmptySegments(RenderURL(template, base, values))
+}
+
+// emptyPathSegment 匹配模板空值留下的路径段：/area//id → /area 段整体删除
+// （MacCMS 路径式 URL 对空筛选段 404；jar 会按模板自动省略空段）。
+var emptyPathSegment = regexp.MustCompile(`/[a-zA-Z][a-zA-Z0-9_]*//`)
+
+// emptyTailSegment 匹配末段空值：/year/.html → .html（前值直接接扩展名）。
+var emptyTailSegment = regexp.MustCompile(`/[a-zA-Z][a-zA-Z0-9_]*/(\.[a-zA-Z]{2,5}(?:\?|$))`)
+
+func (r Rule) cleanEmptySegments(address string) string {
+	for emptyPathSegment.MatchString(address) {
+		address = emptyPathSegment.ReplaceAllString(address, "/")
+	}
+	for emptyTailSegment.MatchString(address) {
+		address = emptyTailSegment.ReplaceAllString(address, "$1")
+	}
+	// query 形态同样清掉空值参数：?area=&id=1 → ?id=1
+	if queryIndex := strings.Index(address, "?"); queryIndex >= 0 {
+		head, query := address[:queryIndex], address[queryIndex+1:]
+		if cleaned := removeEmptyParams(query); cleaned != query {
+			if cleaned == "" {
+				return head
+			}
+			return head + "?" + cleaned
+		}
+	}
+	return address
+}
+
+func removeEmptyParams(query string) string {
+	var kept []string
+	for _, pair := range strings.Split(query, "&") {
+		if key, value, found := strings.Cut(pair, "="); found && value == "" && !strings.Contains(key, "{") {
+			continue
+		}
+		if pair != "" {
+			kept = append(kept, pair)
+		}
+	}
+	return strings.Join(kept, "&")
 }
 
 // ---- URL 组装 ----

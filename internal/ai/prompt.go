@@ -40,8 +40,15 @@ const SystemPrompt = `你是一名 TVBox/XBPQ 爬虫规则编写专家。任务�
 - start&&end：取两串之间的内容。A&&B&&C&&D 构成两步链。
 - 单侧截取：A&&（取到末尾）或 &&B（从头取到 B）。
 - || 分隔多组备选，依次尝试直到命中。
-- 修饰符（写在 token 尾部）：[包含:x,y] [不包含:x,y] [替换:a>>b#c>>d] [含序号:n]
+- 修饰符（写在 token 尾部）：[包含:x,y] [不包含:x,y] [替换:a>>b#c>>d] [含序号:n] [排序:a>b>c]
 - p: 选择器：p:标签.类#id[attr=val] 空格分隔后代；末尾 [href] 表示取该属性值。
+- 通配符 *：起始锚点里可用一个 *（如 <h*>&&</h），匹配任意内容；一个字段只用一个。
+- 转义：连接符 $ # & * [ ] 要表本义时用 \ 转义（如 href="?cat\&&&"）。
+- + 拼接：字面段与截取段混合，如 /play/+href="/vod/&&.html+-1-1.html；URL+j:取值 也靠它。
+- j: json 模式：接口返回 JSON 时不用截取，字段值写 j:路径，如 "数组":"j:data.list"、
+  "标题":"j:name"、"跳转播放链接":"j:data.urls[0].cdnUrl"。下标从 0 开始，[]取全部，[n,]跳过前 n 个。
+  二次截取填 "Base64" 表示整段只解码；Base64(a&&b) 对截取结果解码。
+- 不含 && 也不含 j: 的字段值是「指定字符串」字面量（如 "线路标题":"SVIP短剧"、固定图片 URL）。
 
 # 关键陷阱（踩过的坑，务必避开）
 1. 懒加载占位：列表第一条常见 data-original="/"，会让封面变成首页 URL。
@@ -66,6 +73,16 @@ const SystemPrompt = `你是一名 TVBox/XBPQ 爬虫规则编写专家。任务�
    （如 <div class="row" style="display: block;">），写 "<div class=\"row\">&&</div>" 会匹配不上。
    正解：写成 "<div class=\"row\"&&</div>"（去掉 >），只框住标签开头。
    同理，只有站点确实存在多条播放线路时才写 线路数组；单线路站写了会拆出重复线路。
+8. 【stui/MacCMS 模板坑】分集列表往往在 <ul class="stui-content__playlist…"> 里；播放数组 必须
+   用这个内层 ul（"<ul class=\"stui-content__playlist clearfix\"&&</ul>"），不要用外层的
+   <div class="stui-pannel_bd…"> ——div&&</div> 在嵌套结构里会把内容截错位，分集拆不出来。
+   多线路站（页面有「播放线路 1/2/3…」标题）线路数组 与 播放数组 用同一个 ul 锚点是正确写法。
+9. 【链接吃前缀坑】链接 一律写 "href=\"&&\"" 截出完整路径（如 /vod/123.html）。
+   不要写成 href="/vod/&&.html" 这类把路径前缀嵌进锚点的形态——那样只会截出裸数字 ID，
+   拼出的详情链接全坏（目录看着有 36 条但点不开、详情/播放连锁失败）。
+10.【MacCMS player_aaaa 站】若指纹提示检测到 player_aaaa 配置对象：【不要写 跳转播放链接】，
+   引擎内置解析会直接从 player_aaaa 取 url；手写 "url":"&&" 常先命中同页 var maccms 的
+   "url":"站点域名"，截出坏值。
 
 # 工作流程
 0. 若消息里给出【站点指纹】：它是服务端从真实页面解析并核实过出现次数的锚点，
@@ -124,7 +141,7 @@ func BuildFixMessages(siteURL, ruleJSON string, problems []string, samples []Sam
 	}
 	builder.WriteString("\n修复要求：\n")
 	builder.WriteString("1. 对照上面「条目样本」检查 数组/二次截取 的边界是否把 链接/标题 要用的关键串截掉了；数组框住完整条目即可，具体值交给字段截取。\n")
-	builder.WriteString("2. 若问题出在 detail/play 步骤，对照「详情页样本」里分集容器的真实 HTML 重写 播放数组/播放列表/播放标题/播放链接；播放数组 起始锚点不要带闭合的 >（真实标签常带 style= 等额外属性）。单线路站不要写 线路数组。\n")
+	builder.WriteString("2. 若问题出在 detail/play 步骤，对照「详情页样本」里分集容器的真实 HTML 重写 播放数组/播放列表/播放标题/播放链接；播放数组 起始锚点不要带闭合的 >（真实标签常带 style= 等额外属性）；stui/MacCMS 模板要用内层 ul（…playlist…&&</ul>），别用外层 div&&</div>。单线路站不要写 线路数组；指纹确认多线路时 线路数组 与 播放数组 同锚点即可。若指纹提示 player_aaaa 站，删掉 跳转播放链接 字段交给引擎兜底。\n")
 	builder.WriteString("3. 只改有问题的字段，其它字段保持原样，输出修正后的完整规则。\n")
 	builder.WriteString("4. 只输出 JSON，不要解释。\n")
 	if len(samples) > 0 {

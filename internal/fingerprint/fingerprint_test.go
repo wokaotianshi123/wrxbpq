@@ -150,3 +150,66 @@ func containsStr(s, sub string) bool {
 		return false
 	})()
 }
+
+// TestAnalyzeMacCMSStyleSite 固化 6789ysw.com（kankan/stui 模板）形态：
+// 分集容器是 ul、多线路、player_aaaa 转义直链。指纹必须给出
+// ul&&</ul> 播放数组、多线路指引、省略 跳转播放链接 建议。
+func TestAnalyzeMacCMSStyleSite(t *testing.T) {
+	var items strings.Builder
+	for i := 1; i <= 10; i++ {
+		items.WriteString(`<li class="col-md-6 col-sm-4 col-xs-3"><div class="stui-vodlist__box"><a class="stui-vodlist__thumb lazyload" href="/vod/` + string(rune('0'+i)) + `55.html" title="片` + string(rune('0'+i)) + `" data-original="https://img/x` + string(rune('0'+i)) + `.jpg"><span class="pic-text text-right">HD</span></a></div></li>`)
+	}
+	catalog := `<html><body class="body"><div class="col-lg-wide-75 col-xs-1 padding-0"><div class="row">` + items.String() + `</div></div><div class="col-lg-wide-25"><ul class="m-y detailcol"><li><a href="/label/">标签</a></li></ul></div></body></html>`
+	var eps strings.Builder
+	for _, sid := range []int{1, 2, 3} {
+		eps.WriteString(`<div class="stui-pannel stui-pannel-bg clearfix"><div class="stui-pannel-box b playlist mb"><div class="stui-pannel_hd"><h3 class="title">播放线路 `)
+		eps.WriteString(string(rune('0' + sid)))
+		eps.WriteString(`</h3></div><div class="stui-pannel_bd col-pd clearfix"><ul class="stui-content__playlist clearfix"><li ><a href="/play/55-`)
+		eps.WriteString(string(rune('0' + sid)))
+		eps.WriteString(`-1.html">01</a></li><li ><a href="/play/55-`)
+		eps.WriteString(string(rune('0' + sid)))
+		eps.WriteString(`-2.html">02</a></li></ul></div></div></div>`)
+	}
+	detail := `<html><body class="myui-page"><h1 class="title">某片<span class="score">0.0</span></h1>` + eps.String() + `</body></html>`
+	play := `<html><body><script>var maccms={"path":"","mid":"1","url":"www.6789ysw.com"};</script><script type="text/javascript">var player_aaaa={"flag":"play","encrypt":0,"link":"\/play\/55-1-1.html","url":"https:\/\/vv.jisuzyv.com\/play\/abc\/index.m3u8","from":"dplayer"}</script></body></html>`
+	samples := []ai.Sample{
+		{Label: "首页 https://www.6789ysw.com/", Content: `<html><body><a href="/list/2.html">电视剧</a><a href="/list/1.html">电影</a><a href="/list/2-2.html">下一页</a><form id="search" action="/search/-------------.html"><input name="wd"></form></body></html>`},
+		{Label: "分类页 https://www.6789ysw.com/list/2-1.html", Content: catalog},
+		{Label: "详情页 https://www.6789ysw.com/vod/55.html", Content: detail},
+		{Label: "播放页 https://www.6789ysw.com/play/55-1-1.html", Content: play},
+	}
+	text := Analyze(samples)
+	t.Logf("\n%s", text)
+	checks := map[string]string{
+		"播放数组建议用 ul 内层容器":  `播放数组 建议 "<ul class=\"stui-content__playlist clearfix\"&&</ul>"`,
+		"多线路指引":              "检测到 3 个「播放线路」标题：这是多线路站",
+		"player_aaaa 省略指引":    "检测到 MacCMS player_aaaa 配置对象：跳转播放链接 建议【整个字段省略不写】",
+		"转义直链找到":              "https://vv.jisuzyv.com/play/abc/index.m3u8",
+		"数组+链接实测":             "截出指向 /vod/ 的可跳转链接",
+		"分集条目原文避开留言":         "第一个分集条目原文",
+		"MacCMS 分页形态":         "/list/{cateId}-2.html",
+	}
+	for name, token := range checks {
+		if !strings.Contains(text, token) {
+			t.Errorf("%s：指纹未含 %q", name, token)
+		}
+	}
+	// 该站的正确规则（含 线路数组==播放数组）不得被 Check 误报
+	good := `{"主页url":"https://www.6789ysw.com/","数组":"<li class=\"col-md-6 col-sm-4 col-xs-3\"&&</li>","二次截取":"<div class=\"col-lg-wide-75 col-xs-1 padding-0\"&&","标题":"title=\"&&\"","链接":"href=\"&&\"","列表图片":"data-original=\"&&\"","播放数组":"<ul class=\"stui-content__playlist clearfix\"&&</ul>","线路数组":"<ul class=\"stui-content__playlist clearfix\"&&</ul>","播放列表":"<li","播放标题":">&&</a>","播放链接":"href=\"&&\""}`
+	for _, issue := range Check(good, samples) {
+		t.Errorf("多线路好规则被误报: [%s] %s", issue.Field, issue.Problem)
+	}
+	// AI 坏规则（链接吃路径前缀）必须被"提取合理性"检出
+	bad := `{"主页url":"https://www.6789ysw.com/","数组":"<li class=\"col-md-6&&</li>","标题":"title=\"&&\"","链接":"href=\"/vod/&&.html\"","播放数组":"<div class=\"stui-pannel_bd col-pd clearfix\"&&</div>","播放列表":"<li"}`
+	issues := Check(bad, samples)
+	foundLink := false
+	for _, issue := range issues {
+		t.Logf("坏规则检出 [%s] %s", issue.Field, issue.Problem)
+		if issue.Field == "链接" {
+			foundLink = true
+		}
+	}
+	if !foundLink {
+		t.Errorf("链接吃路径前缀的坏规则未被检出")
+	}
+}
