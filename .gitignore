@@ -1,7 +1,9 @@
 # 构建产物
-wrxbpq
-wrxbpq.exe
+/wrxbpq
+/wrxbpq.exe
 wrxbpq-server.exe
+wrxbpq-server.exe~
+*.exe~
 dist/
 .vercel/
 
@@ -14,3 +16,5 @@ dist/
 .idea/
 *.swp
 .DS_Store
+/wrxbpq-cli.exe
+final_rule.json
