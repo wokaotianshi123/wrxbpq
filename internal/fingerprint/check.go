@@ -102,13 +102,32 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 		add("播放列表", fmt.Sprintf("播放列表 分隔符 %q 在详情页样本里一次都没出现——Split 切不开，分集只会剩 1 条。请从详情页原文里挑一个能把每条分集分开的真实串（分集是 <li> 结构时通常写 </li>）", list))
 	}
 	if route := rule.Field("线路数组"); route != "" {
+		// 引擎语义：线路数组 截出的【每一段】= 该线路的分集容器（用 $$$ 拼接后按 播放列表 切分集）。
+		// 因此它必须锚在分集列表容器上，锚成"线路切换按钮"（ewave-tab / hl-tabs-btn / dropdown 的 li）
+		// 会让每条线路都是 0 集——这是最隐蔽的写法错误，静态看锚点"确实存在"却完全取不到分集。
+		if detail != "" && !strings.HasPrefix(route, "j:") {
+			if segments := xbpq.List(detail, route); len(segments) > 0 {
+				withLink := 0
+				for _, segment := range segments {
+					if episodeCountIn(segment, rule) > 0 {
+						withLink++
+					}
+				}
+				if withLink == 0 {
+					add("线路数组", fmt.Sprintf("线路数组 截出 %d 段，但没有一段含分集链接——引擎把线路数组的每一段当作「该线路的分集容器」来切分集，锚成线路切换按钮/标题行会让每条线路都是 0 集。线路数组 必须用与 播放数组 相同的【分集列表容器】锚点（如 <ul class=\\\"playlist\\\">&&</ul>），不能用线路按钮（ewave-tab、hl-tabs-btn 等）的锚点", len(segments)))
+				} else if withLink < len(segments) {
+					// 部分段没链接：多半是第一条线路 class 带 active/样式差异被前缀漏掉，线路数会少一条。
+					add("线路数组", fmt.Sprintf("线路数组 截出 %d 段，其中只有 %d 段含分集链接——起始锚点过严，漏掉了 class 带附加值的线路（如首条常写成 class=\\\"xxx active\\\"）。去掉锚点末尾的 > 或引号，只框住标签开头的公共前缀", len(segments), withLink))
+				}
+			}
+		}
 		if play := rule.Field("播放数组"); play != "" && sameStart(route, play) {
 			// 多线路站里 线路数组==播放数组 是正确写法；只有确认单线路时才报"拆重复线路"。
 			// 任一证据（标题/容器段/hl按钮/dropdown）≥2 即视为多线路不误报。
 			containerRoutes := 0
 			if detail != "" && !strings.HasPrefix(route, "j:") {
 				for _, segment := range xbpq.List(detail, route) {
-					if playHrefPattern.MatchString(segment) {
+					if episodeCountIn(segment, rule) > 0 {
 						containerRoutes++
 					}
 				}
@@ -146,6 +165,20 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 					}
 					if good == 0 && bare >= 3 {
 						add("链接", "按 数组 截出的条目用 链接=\""+clipToken(link, 40)+"\" 只能取到裸 ID（如 55560），拼不成可跳转链接——把 /vod/ 之类路径前缀从锚点里去掉，逐字用 \"href=\\\"&&\\\"\"")
+					}
+				}
+				// 锚点过宽：截出很多段却大半提不出 标题/链接，说明框进了导航、轮播、广告等非条目区块。
+				// 典型踩坑：数组 写成 <li class="&&</li> 这类"只写属性名开头"的宽锚点。
+				if titlePat := rule.Field("标题"); titlePat != "" && link != "" && len(entries) >= 3 {
+					usable := 0
+					for _, entry := range entries {
+						if strings.TrimSpace(xbpq.CutOnce(entry, titlePat)) != "" &&
+							strings.TrimSpace(xbpq.CutOnce(entry, link)) != "" {
+							usable++
+						}
+					}
+					if usable*2 < len(entries) {
+						add("数组", fmt.Sprintf("数组 锚点在分类页截出 %d 段，但只有 %d 段能同时提出 标题 和 链接——锚点过宽，把导航/轮播/广告区也框进来了（如 <li class=\\\"&&</li> 会命中页面里所有 li）。改写成条目独有 class 的完整开标签，如 <li class=\\\"col-xs-4 col-md-3 col-lg-2\\\"&&</li>", len(entries), usable))
 					}
 				}
 			} else if len(entries) == 0 {
@@ -211,4 +244,31 @@ func occurrencesInAll(samples []ai.Sample, token string) int {
 		total += strings.Count(sample.Content, token)
 	}
 	return total
+}
+
+// episodeCountIn 按规则自身的 播放列表（分隔符）+ 播放链接 实测一段里能提出几条分集，
+// 与引擎 episodes() 的切分行为一致。比固定正则通用得多——站点用 /bpplay/、/video/
+// 之类非常见前缀时，只看 playHrefPattern 会误判成"这一段没有分集"。
+func episodeCountIn(segment string, rule xbpq.Rule) int {
+	split := rule.Field("播放列表")
+	if split == "" || split == "&&" {
+		split = "#"
+	}
+	linkPattern := rule.Field("播放链接")
+	count := 0
+	for _, one := range strings.Split(segment, split) {
+		if strings.TrimSpace(one) == "" {
+			continue
+		}
+		if linkPattern != "" {
+			if strings.TrimSpace(xbpq.CutOnce(one, linkPattern)) != "" {
+				count++
+			}
+			continue
+		}
+		if playHrefPattern.MatchString(one) {
+			count++
+		}
+	}
+	return count
 }

@@ -542,3 +542,57 @@ func TestCheckFailedCategoryID(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckRouteArrayMustBeEpisodeContainer 固化「线路数组 必须锚分集容器」：
+// 引擎把线路数组截出的每一段当作该线路的分集容器，锚成线路切换按钮（lanfengjian 的 ewave-tab）
+// 会让每条线路都是 0 集——锚点本身在页面里存在，只有"段内有无分集链接"能判定。
+func TestCheckRouteArrayMustBeEpisodeContainer(t *testing.T) {
+	detail := `<ul class="nav"><li class="swiper-slide ewave-tab active" data-target="#p1">量子</li>` +
+		`<li class="swiper-slide ewave-tab" data-target="#p2">西瓜云</li>` +
+		`<li class="swiper-slide ewave-tab" data-target="#p3">豆瓣</li></ul>` +
+		`<ul class="row ewave-playlist-sort-content"><li><a href="/bpplay/150-1-1.html">第01集</a></li><li><a href="/bpplay/150-1-2.html">第02集</a></li></ul>` +
+		`<ul class="row ewave-playlist-sort-content"><li><a href="/bpplay/150-2-1.html">第01集</a></li><li><a href="/bpplay/150-2-2.html">第02集</a></li></ul>` +
+		`<ul class="row ewave-playlist-sort-content"><li><a href="/bpplay/150-3-1.html">第01集</a></li><li><a href="/bpplay/150-3-2.html">第02集</a></li></ul>`
+	samples := []ai.Sample{{Label: "详情页 https://a.com/ln/150.html", Content: detail}}
+
+	bad := `{"主页url":"https://a.com","线路数组":"<li class=\"swiper-slide ewave-tab\"&&</li>","播放数组":"<ul class=\"row ewave-playlist-sort-content\"&&</ul>","播放标题":">&&</a>","播放链接":"href=\"&&\"","播放列表":"</li>"}`
+	if !hasIssue(Check(bad, samples), "线路数组", "分集容器") {
+		t.Errorf("线路数组 锚成线路按钮（段内无分集链接）应被拦截：%s", dumpIssues(Check(bad, samples)))
+	}
+	// 正确写法：线路数组 与 播放数组 同锚点，不应报线路数组
+	good := `{"主页url":"https://a.com","线路数组":"<ul class=\"row ewave-playlist-sort-content\"&&</ul>","播放数组":"<ul class=\"row ewave-playlist-sort-content\"&&</ul>","播放标题":">&&</a>","播放链接":"href=\"&&\"","播放列表":"</li>"}`
+	for _, issue := range Check(good, samples) {
+		if issue.Field == "线路数组" {
+			t.Errorf("线路数组 用分集容器锚点被误报：%v", issue)
+		}
+	}
+}
+
+// TestCheckArrayAnchorTooWide 固化「数组 锚点过宽」拦截：
+// <li class="&&</li> 这类只写属性名开头的锚点会命中导航/轮播 li，截出的大半段提不出标题。
+func TestCheckArrayAnchorTooWide(t *testing.T) {
+	slider := strings.Repeat(`<li class="swiper-slide"><a href="/label/new.html">最近更新</a></li>`, 8)
+	real := strings.Repeat(`<li class="col-xs-4 col-md-3 col-lg-2"><a href="/ln/1.html" title="剧一"></a></li>`, 4)
+	samples := []ai.Sample{{Label: "分类页 https://a.com/vodtype/2-1.html", Content: "<ul>" + slider + real + "</ul>"}}
+
+	wide := `{"主页url":"https://a.com","数组":"<li class=\"&&</li>","标题":"title=\"&&\"","链接":"href=\"&&\""}`
+	if !hasIssue(Check(wide, samples), "数组", "锚点过宽") {
+		t.Errorf("数组 锚点过宽应被拦截：%s", dumpIssues(Check(wide, samples)))
+	}
+	precise := `{"主页url":"https://a.com","数组":"<li class=\"col-xs-4 col-md-3 col-lg-2\"&&</li>","标题":"title=\"&&\"","链接":"href=\"&&\""}`
+	for _, issue := range Check(precise, samples) {
+		if issue.Field == "数组" && strings.Contains(issue.Problem, "锚点过宽") {
+			t.Errorf("精确锚点被误报：%v", issue)
+		}
+	}
+}
+
+// hasIssue 判定是否存在指定字段且问题文案含关键字。
+func hasIssue(issues []CheckIssue, field, keyword string) bool {
+	for _, issue := range issues {
+		if issue.Field == field && strings.Contains(issue.Problem, keyword) {
+			return true
+		}
+	}
+	return false
+}

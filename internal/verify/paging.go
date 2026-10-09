@@ -30,7 +30,31 @@ var (
 	nextPageLabelPattern = regexp.MustCompile(`(?i)>\s*(下一?页|next)`)
 	aTagClosePattern     = regexp.MustCompile(`(?is)<a\b[^>]*>.+?</a>`)
 	hrefExtractPattern   = regexp.MustCompile(`(?i)href="([^"]+)"`)
+	htmlTitlePattern     = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
 )
+
+// pageTitleLabel 取 <title> 里第一个分隔符之前的部分作为"当前栏目/分类名"。
+// MacCMS 类站点 title 形如「电影-星辰影院_…」：翻到第 2 页时这段【不变】，
+// 而拼错成无效分类（如 /vodtype/1_2.html 会被服务端当成 id="1_2" 的分类）
+// 时这段会变成空或其它值（实测该站错误页 title 是「-星辰影院_…」，栏目名为空）。
+// 返回空串表示提不出栏目名（页面没 title 或 title 无分隔结构），此时不施加该约束。
+func pageTitleLabel(body string) string {
+	match := htmlTitlePattern.FindStringSubmatch(body)
+	if match == nil {
+		return ""
+	}
+	text := strings.TrimSpace(match[1])
+	if text == "" {
+		return ""
+	}
+	cut := len(text)
+	for _, sep := range []string{"-", "_", "|", "–", "—", "—"} {
+		if index := strings.Index(text, sep); index >= 0 && index < cut {
+			cut = index
+		}
+	}
+	return strings.TrimSpace(text[:cut])
+}
 
 // probePaging 对分类页做分页实测。catalogBody 用未裁剪的完整页面。
 // idPos 是「分类检测」实测出的 {cateId} 位置：传入后分页探测会锚定在该分类上，
@@ -78,6 +102,15 @@ func probePaging(ctx context.Context, fetcher *xbpq.Fetcher, catalogURL, catalog
 		second := entrySet(body)
 		if len(second) == 0 {
 			return PagingFinding{}, "抓回页里提不出条目链接"
+		}
+		// 栏目名一致性：本分类的第 2 页 title 里的栏目名必须与第 1 页一致。
+		// 拼错成无效分类时服务端会返回一个"空栏目"兜底页（栏目名变空），
+		// 内容与第 1 页也不重合，光看重合率会把这种错误页当成"翻页生效"。
+		if baseLabel := pageTitleLabel(catalogBody); baseLabel != "" {
+			if got := pageTitleLabel(body); got != baseLabel {
+				return PagingFinding{}, fmt.Sprintf("页面标题栏目名 %q 与第1页 %q 不一致——它不是本分类的第2页（多半是拼成了无效分类，落到了空栏目兜底页）",
+					got, baseLabel)
+			}
 		}
 		score := overlap(first, second)
 		if score >= 85 {
@@ -181,6 +214,14 @@ func pagingCandidates(catalogURL, catalogBody string, idPos idPosition) []string
 		if other.Path == base.Path && other.RawQuery == base.RawQuery {
 			continue
 		}
+		// 【结构性硬约束】候选路径与基准路径至多只能有一段不同，除非它带「下一页/next」文字。
+		// 跨目录链接（如 /vodtype/1.html → /voddetail/175828.html，差 2 段）是另一种页面
+		// （详情页 / 其它栏目），内容天然与分类页不同，会骗过"重合率低 = 翻页生效"的判据。
+		// 带明确「下一页」文字的链接是强信号，豁免这条约束（少数站分页区路径确实不同）。
+		labelled := nextPageLabelPattern.MatchString(tag)
+		if labelled == false && base.Path != other.Path && !atMostOnePathSegmentDiff(base.Path, other.Path) {
+			continue
+		}
 		// 已锚定分类：候选必须保持同一 {cateId}，否则它是"下一类"链接而非"下一页"，
 		// 会让分页把分类号误当页码，产出与 {cateId} 冲突的错误模板。
 		if idPosValid(idPos) && idPos.extractID(absolute) != baseID {
@@ -203,6 +244,29 @@ func pagingCandidates(catalogURL, catalogBody string, idPos idPosition) []string
 		}
 	}
 	return out
+}
+
+// atMostOnePathSegmentDiff 判定两条路径是否"至多一段不同"。
+// 分页只可能发生在一个栏目路径内：/vodtype/1.html → /vodtype/1-2.html（同段差异）
+// 或 /vodtype/1.html → /vodtype/2.html（相邻 tid 差异，再交给同 {cateId} 闸门）。
+// 而 /vodtype/1.html → /voddetail/175828.html 差了 2 段，属跨栏目/跨页面类型，
+// 坚决不能作为分页候选。
+func atMostOnePathSegmentDiff(basePath, otherPath string) bool {
+	a := strings.Split(basePath, "/")
+	b := strings.Split(otherPath, "/")
+	if len(a) != len(b) {
+		return false
+	}
+	diff := 0
+	for i := range a {
+		if a[i] != b[i] {
+			diff++
+			if diff > 1 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // synthPagingCandidates 在已实测确定 {cateId} 位置的分类 URL 上，按常见分页形态

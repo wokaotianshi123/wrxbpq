@@ -801,7 +801,9 @@ func findAllRanges(body, token string) [][2]int {
 // 或播放脚本 play.php（vodplay.php 内含 play.php?，一并命中）。
 // 早期只认 /play/ 会漏掉 MacCMS 的 /vodplay/1-1-1.html 连写形态，导致这类站
 // 整个详情页分集识别为空、多线路无从判起。
-var playHrefPattern = regexp.MustCompile(`href="[^"]*?(?:/play/|/vodplay/|/playhtml/|/dplay/|play\.php\?)[^"]*"`)
+// 播放页链接形态：/play/、/bpplay/、/vodplay/、/playhtml/、/dplay/、play.php?
+// （各站前缀不同，漏掉某一种会让该站的多线路检测与分集校验全部失效。）
+var playHrefPattern = regexp.MustCompile(`href="[^"]*?(?:/play/|/bpplay/|/vodplay/|/playhtml/|/dplay/|play\.php\?)[^"]*"`)
 
 // hlTabPattern hl(海蓝)皮肤线路按钮：class 含 hl-tabs-btn，一排按钮对应多个分集面板。
 var hlTabPattern = regexp.MustCompile(`(?i)<a[^>]*class="[^"]*hl-tabs-btn[^"]*"[^>]*>`)

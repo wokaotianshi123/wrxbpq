@@ -273,6 +273,11 @@ func onlyDigits(s string) bool {
 }
 
 // extractID 按已知 id 位置从具体分类 URL 里取出 id 值。
+//
+// 【关键】必须从 prefix 处取一个【完整的 token】，而不是按样本 id 的固定长度截取。
+// 实测踩坑：样本 /vodtype/1.html 学到的 tokenLen=1，套到 /voddetail/175828.html
+// 上会截出 "1"，与分类 ID "1" 相等 → 「候选必须同 {cateId}」这道闸门失效，
+// 详情页被当成该分类的"第 2 页"，分页实测据此产出 voddetail/{cateId}{catePg}.html 这种垃圾模板。
 func (p idPosition) extractID(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil {
@@ -284,12 +289,42 @@ func (p idPosition) extractID(raw string) string {
 			return ""
 		}
 		segment := segments[p.pathIndex]
-		if len(segment) < p.prefix+p.tokenLen {
+		if len(segment) < p.prefix {
 			return ""
 		}
-		return segment[p.prefix : p.prefix+p.tokenLen]
+		rest := segment[p.prefix:]
+		if rest == "" {
+			return ""
+		}
+		// 基准 id 是纯数字时只取【连续数字串】：
+		//   /list/2-2.html → "2"（与 /list/2.html 同属分类 2，是合法的分页候选）
+		//   /voddetail/175828.html → "175828"（与分类 "1" 不同，正确过滤）
+		// 而含 -/_ 的 slug id 才取整段 token（如 fenlei1-----------）。
+		if onlyDigits(p.exampleID) {
+			end := 0
+			for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+				end++
+			}
+			if end == 0 {
+				return ""
+			}
+			return rest[:end]
+		}
+		end := 0
+		for end < len(rest) && isIDTokenByte(rest[end]) {
+			end++
+		}
+		if end == 0 {
+			return ""
+		}
+		return rest[:end]
 	}
 	return parsed.Query().Get(p.queryKey)
+}
+
+// isIDTokenByte 判断字符是否属于 id token（与 splitSegmentTokens 同一字符集）。
+func isIDTokenByte(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '-' || c == '_'
 }
 
 // buildTemplate 生成把 id 段换成 {cateId} 的分类 URL 模板。
