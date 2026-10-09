@@ -27,6 +27,9 @@ func Analyze(samples []ai.Sample) string {
 	var out []string
 	out = append(out, "【站点指纹】以下锚点由服务端从真实页面样本里解析，并统计过出现次数。")
 	out = append(out, "规则里的 pattern 一律照抄指纹中的锚点原文（逐字符，含空格与引号），禁止凭印象改写；指纹没覆盖的字段再回到样本原文里逐字复制。")
+	if block := templateBlock(home, catalog, detail); block != "" {
+		out = append(out, "\n== 模板与简写（先看这里）==\n"+block)
+	}
 	if block := homeBlock(home); block != "" {
 		out = append(out, "\n== 首页（分类与搜索）==\n"+block)
 	}
@@ -49,6 +52,147 @@ func pick(samples []ai.Sample, label string) string {
 		}
 	}
 	return ""
+}
+
+// ---- 模板与简写 ----
+
+// skinPattern 探测页面用的是哪套前端皮肤（决定模板默认备选链能否命中）。
+var skinPatterns = []struct{ name, probe string }{
+	{"myui", `myui-`},
+	{"stui", `stui-`},
+	{"hl(海蓝)", `hl-`},
+	{"module(苹果新版)", `module-`},
+	{"conch", `conch`},
+}
+
+// detectSkin 返回样本里出现次数最多的皮肤名与次数。
+func detectSkin(bodies ...string) (string, int) {
+	counts := map[string]int{}
+	for _, body := range bodies {
+		if body == "" {
+			continue
+		}
+		for _, skin := range skinPatterns {
+			if at := strings.Count(body, skin.probe); at > 0 {
+				counts[skin.name] += at
+			}
+		}
+	}
+	best, bestName := 0, ""
+	for _, skin := range skinPatterns { // 按声明顺序稳定取名次
+		if counts[skin.name] > best {
+			best, bestName = counts[skin.name], skin.name
+		}
+	}
+	return bestName, best
+}
+
+// guessCategoryTemplate 从首页/分类页样本里挑一条分类链接，还原成带占位符的 分类url 形态，
+// 用于喂给 MatchTemplate 判断命中哪个家族。返回 (模板串, 真实链接示例)。
+func guessCategoryTemplate(home, catalog string) (string, string) {
+	scope := home
+	if scope == "" {
+		scope = catalog
+	}
+	if scope == "" {
+		return "", ""
+	}
+	// 常见分类页链接形态，按家族优先级匹配。
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)href="(/index\.php/vod/(?:type|show)/id/[0-9a-z]+/[^"]*)"`),
+		regexp.MustCompile(`(?i)href="(/vod(?:type|show|list)/[0-9a-z][^"]*)"`),
+		regexp.MustCompile(`(?i)href="(/list/[0-9]+(?:-[0-9]+)?\.html)"`),
+		regexp.MustCompile(`(?i)href="(/(?:type|show|category|fenlei|vs|vshow|screen)/[0-9a-zA-Z][^"]*)"`),
+	}
+	for _, re := range patterns {
+		m := re.FindStringSubmatch(scope)
+		if len(m) < 2 {
+			continue
+		}
+		link := m[1]
+		tpl := templatizeCategory(link)
+		if tpl != "" {
+			return tpl, link
+		}
+	}
+	return "", ""
+}
+
+// templatizeCategory 把真实分类链接里的数字 ID / 页码替换成 {cateId}/{catePg}。
+func templatizeCategory(link string) string {
+	if !strings.Contains(link, "/") {
+		return ""
+	}
+	// /list/2-1.html → /list/{cateId}-{catePg}.html；/list/2.html → /list/{cateId}.html
+	if out := dashListPattern.ReplaceAllString(link, "/list/{cateId}-{catePg}.html"); out != link {
+		return out
+	}
+	if out := plainListPattern.ReplaceAllString(link, "/list/{cateId}.html"); out != link {
+		return out
+	}
+	// /vodtype/3.html → /vodtype/{cateId}.html；/vodshow/3-… → /vodshow/{cateId}-…
+	if out := vodPathPattern.ReplaceAllString(link, "${1}/{cateId}"); out != link {
+		return out
+	}
+	// 通用：把路径里的分类数字段当 cateId
+	if out := genericIDPattern.ReplaceAllString(link, "/${1}/{cateId}"); out != link {
+		return out
+	}
+	return link
+}
+
+var (
+	dashListPattern  = regexp.MustCompile(`(?i)/list/\d+-\d+\.html`)
+	plainListPattern = regexp.MustCompile(`(?i)/list/\d+\.html`)
+	vodPathPattern   = regexp.MustCompile(`(?i)(/vod(?:type|show|detail|play))/\d+`)
+	genericIDPattern = regexp.MustCompile(`(?i)/(type|show|category|fenlei|vs|vshow|screen)/\d+`)
+)
+
+// templateBlock 生成「模板与简写」指纹块：识别皮肤、命中家族、可省略字段清单。
+func templateBlock(home, catalog, detail string) string {
+	skin, skinCount := detectSkin(catalog, detail, home)
+	tpl, example := guessCategoryTemplate(home, catalog)
+	var lines []string
+	lines = append(lines, "页面皮肤探测："+func() string {
+		if skin == "" {
+			return "未识别到 myui/stui/hl/module 标准皮肤（可能是自定义模板）——这类站【不要简写】，所有 数组/播放数组/标题/链接 必须按样本实测逐字写。"
+		}
+		return fmt.Sprintf("%s（样本出现 %d 次）", skin, skinCount)
+	}())
+	if tpl == "" {
+		lines = append(lines, "分类链接形态：首页未识别到标准分类链接，无法套用内置模板——按样本全字段手写。")
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, fmt.Sprintf("分类url 推断形态：%q（源自真实链接 %s）", collapseSpace(tpl), example))
+	familyName, merged := xbpq.MatchTemplate(tpl)
+	if merged == nil {
+		lines = append(lines, "该形态未命中内置模板家族——按样本全字段手写。")
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, "命中内置模板家族："+familyName)
+	// 皮肤与家族默认链是否吻合：不吻合时简写会踩空，须提示。
+	if skin != "" {
+		ok := map[string][]string{
+			"myui":   {"MacCMS", "MacCMS接口(JSON)", "路径式泛型", "通用高频"},
+			"stui":   {"MacCMS", "MacCMS接口(JSON)", "路径式泛型", "通用高频"},
+			"hl(海蓝)": {"MacCMS", "路径式泛型", "通用高频"},
+		}[skin]
+		compatible := ok == nil
+		for _, name := range ok {
+			if strings.Contains(familyName, name) {
+				compatible = true
+				break
+			}
+		}
+		if !compatible {
+			lines = append(lines, fmt.Sprintf("⚠ 皮肤是 %s 但命中模板链以其它皮肤为主，模板默认可能截不到——简写后务必逐步验证，失败字段按样本补写。", skin))
+		}
+	}
+	skippable := xbpq.TemplateFieldNames(merged)
+	lines = append(lines, "这些字段引擎会用模板兜底、【可以省略不写】："+strings.Join(skippable, "、"))
+	lines = append(lines, "简写规则仍【必须写】：分类、分类url、搜索url（若模板没给）、以及样本里与皮肤不符、模板截不到的字段。")
+	lines = append(lines, "策略：能对上皮肤的字段直接省略靠模板；模板指纹没覆盖、或与样本 HTML 不一致的字段，回到样本逐字实测再写，不要盲信模板默认值。")
+	return strings.Join(lines, "\n")
 }
 
 func occurrences(body, token string) int { return strings.Count(body, token) }
@@ -458,12 +602,28 @@ func detailBlock(body string) string {
 		} else {
 			lines = append(lines, fmt.Sprintf("  → 播放数组 建议 \"%s&&</div>\"——起始锚点必须去掉尾部的 >，因为真实标签往往带 style= 等额外属性，带 > 会匹配不上。", escapeGo(prefix)))
 		}
-		// 多线路判定要数「播放线路 N」标题而不是容器出现次数：容器次数受样本裁剪影响，标题才是站点行为的直接证据
+		// 多线路判定：两路证据——①「播放线路 N」文字标题；②把线路容器锚点
+		// 真喂给截取引擎数段数（每段含 /play/ 链接才算一条线路）。
+		// 很多站没有"播放线路"字样但线路容器并排多个，只数文字会漏判。
 		routes := routeTitlePattern.FindAllString(body, -1)
-		if len(routes) >= 2 {
-			lines = append(lines, fmt.Sprintf("  检测到 %d 个「播放线路」标题：这是多线路站。线路数组 与 播放数组 使用同一个列表容器锚点（%s&&%s）是正确写法——每个容器就是一条线路。", len(routes), escapeGo(prefix), endTag))
-		} else if occurrences(body, prefix) >= 2 && len(routes) == 0 {
-			lines = append(lines, fmt.Sprintf("  该容器出现 %d 次但未检测到「播放线路」标题：若确认只有一条线路，就不要写 线路数组（写了会把每一行拆成重复线路）。", occurrences(body, prefix)))
+		containerRoutes := 0
+		if container != "" {
+			probe := prefix + "&&" + endTag
+			for _, seg := range xbpq.List(body, probe) {
+				if playHrefPattern.MatchString(seg) {
+					containerRoutes++
+				}
+			}
+		}
+		routeCount := len(routes)
+		if containerRoutes > routeCount {
+			routeCount = containerRoutes
+		}
+		if routeCount >= 2 {
+			lines = append(lines, fmt.Sprintf("  检测到 %d 条播放线路（「播放线路」标题 %d 个；线路容器独立截出 %d 段，每段都含分集链接）：这是多线路站，【必须写 线路数组】——线路数组 与 播放数组 用同一个列表容器锚点（%s&&%s）即可，引擎按容器切分线路；若每条线路有容器标题行（如 <h3 class=\"title\">…、data-dropdown-value=…），再写 线路标题 截它。",
+				routeCount, len(routes), containerRoutes, escapeGo(prefix), endTag))
+		} else if occurrences(body, prefix) >= 2 && routeCount < 2 {
+			lines = append(lines, fmt.Sprintf("  该容器出现 %d 次但独立截取只得到 %d 条有效线路：若确认只有一条线路，就不要写 线路数组（写了会把每一行拆成重复线路）。", occurrences(body, prefix), containerRoutes))
 		}
 	}
 	if at := occurrences(body, "<li"); best > 0 && at >= best {

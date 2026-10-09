@@ -55,12 +55,21 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 
 	if route := rule.Field("线路数组"); route != "" {
 		if play := rule.Field("播放数组"); play != "" && sameStart(route, play) {
-			// 多线路站（详情页出现 ≥2 个「播放线路 N」标题）里 线路数组==播放数组 是正确写法；
-			// 只有确认单线路时才报"拆重复线路"。
+			// 多线路站里 线路数组==播放数组 是正确写法；只有确认单线路时才报"拆重复线路"。
+			// 两路证据（与指纹判定一致）：①「播放线路 N」标题 ≥2；②把 线路数组 真喂给
+			// 截取引擎，独立截出 ≥2 段且每段含 /play/ 链接。任一成立即视为多线路不误报。
 			detail := pick(samples, "详情页")
 			routeTitles := routeTitlePattern.FindAllString(detail, -1)
-			if len(routeTitles) < 2 {
-				add("线路数组", "线路数组 与 播放数组 起始锚点相同且样本未见多线路标题：会把同一线路的每一行拆成重复\"线路\"，单线路站必须删除 线路数组（多线路的锚点应是每条线路的容器标题行）")
+			containerRoutes := 0
+			if detail != "" && !strings.HasPrefix(route, "j:") {
+				for _, segment := range xbpq.List(detail, route) {
+					if playHrefPattern.MatchString(segment) {
+						containerRoutes++
+					}
+				}
+			}
+			if len(routeTitles) < 2 && containerRoutes < 2 {
+				add("线路数组", "线路数组 与 播放数组 起始锚点相同且样本未见多线路（无「播放线路」标题、线路容器也独立截不出 ≥2 段）：会把同一线路的每一行拆成重复\"线路\"，单线路站必须删除 线路数组（多线路的锚点应是每条线路的容器标题行）")
 			}
 		}
 	}
@@ -96,8 +105,12 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 		}
 	}
 
-	// 锚点在样本里核实：字段 pattern 的起始锚点若所有样本文档一字未现 → 大概率是 AI 改写/记错了 HTML
+	// 锚点在样本里核实：字段 pattern 的起始锚点若所有样本文档一字未现 → 大概率是 AI 改写/记错了 HTML。
+	// 模板补齐的字段（简写规则）跳过——模板默认锚点本来就不保证出现在本站样本里。
 	for _, name := range []string{"数组", "标题", "链接", "列表图片", "播放数组", "播放标题", "播放链接", "跳转播放链接"} {
+		if !rule.DeclaresField(name) {
+			continue
+		}
 		pattern := rule.Field(name)
 		if pattern == "" || strings.HasPrefix(pattern, "p:") || strings.HasPrefix(pattern, "jsoup:") || strings.HasPrefix(pattern, "j:") {
 			continue

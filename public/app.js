@@ -18,7 +18,7 @@ const STEP_NAMES = {
 };
 
 const $ = (id) => document.getElementById(id);
-const state = { problems: [], detailId: '', running: false, samples: [] };
+const state = { problems: [], detailId: '', running: false, samples: [], fingerprint: '' };
 
 // ---- 配置持久化 ----
 
@@ -122,9 +122,14 @@ async function probe() {
       return;
     }
     state.samples = data.samples || [];
-    out.textContent = (data.samples || [])
+    state.fingerprint = data.fingerprint || '';
+    const summary = (data.samples || [])
       .map((s) => `${s.label} — ${s.content.length} 字符`)
       .join('\n');
+    out.textContent = summary
+      + (data.fingerprint ? '\n\n' + data.fingerprint : '')
+      + '\n\n✅ 基础数据已就绪，可以点「AI 生成规则」。';
+    updateGenerateEnabled();
   } catch (error) {
     out.textContent = '抓取失败：' + error.message;
   }
@@ -152,6 +157,9 @@ async function generate(isFix) {
   if (isFix && state.problems.length === 0) {
     return alert('没有验证失败信息可交给 AI——请先点「开始验证」，验证出现失败后修复按钮才有内容。');
   }
+  if (!isFix && (!state.samples || state.samples.length === 0)) {
+    return alert('必须先点击「抓取样本」获取站点基础数据，AI 才能依据真实页面写规则。\n现在就去抓取？');
+  }
   const label = isFix ? 'AI 修复中…' : 'AI 生成中…';
   $('genStatus').textContent = label;
   startElapsed(label);
@@ -178,7 +186,10 @@ async function generate(isFix) {
     }
     $('rule').value = data.rule;
     if (data.samples && data.samples.length) state.samples = data.samples;
-    $('genStatus').textContent = isFix ? '已修复规则（请重新验证）' : '已生成规则';
+    if (data.fingerprint) state.fingerprint = data.fingerprint;
+    let done = isFix ? '已修复规则（请重新验证）' : '已生成规则';
+    if (data.templateHit) done += ` — 命中模板：${data.templateHit}`;
+    $('genStatus').textContent = done;
     state.problems = [];
     $('btnFix').disabled = true;
   } catch (error) {
@@ -241,6 +252,16 @@ function setBusy(busy) {
   ['btnProbe', 'btnGenerate', 'btnVerify', 'btnFix'].forEach((id) => {
     $(id).disabled = busy;
   });
+  if (!busy) updateGenerateEnabled();
+}
+
+// 强制依赖抓取：没有样本就不允许点「AI 生成规则」。
+function updateGenerateEnabled() {
+  const btn = $('btnGenerate');
+  if (!btn) return;
+  const ready = state.samples && state.samples.length > 0;
+  btn.disabled = state.running || !ready;
+  btn.title = ready ? '' : '请先点击「抓取样本」获取站点基础数据';
 }
 
 function copyRule() {
@@ -280,6 +301,19 @@ $('btnDownload').addEventListener('click', downloadRule);
 ['baseUrl', 'model', 'apiKey', 'notes'].forEach((id) => {
   $(id).addEventListener('change', saveConfig);
 });
+// 站点地址一变，旧样本即失效，必须重新抓取才能生成。
+$('site').addEventListener('input', () => {
+  if (state.samples && state.samples.length) {
+    state.samples = [];
+    state.fingerprint = '';
+    const out = $('probeOut');
+    if (!out.classList.contains('hidden')) {
+      out.textContent = '站点地址已更改，请重新「抓取样本」。';
+    }
+    updateGenerateEnabled();
+  }
+});
 
 loadConfig();
 renderSteps();
+updateGenerateEnabled();

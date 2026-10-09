@@ -352,14 +352,20 @@ func stepDetail(ctx context.Context, engine *xbpq.Engine, detailID string) (Step
 	if issue != "" {
 		return fail("detail", issue), detailID, nil
 	}
+	routeCount := 1
+	for _, chapter := range chapters {
+		if n := len(chapter.Routes) + 1; n > routeCount {
+			routeCount = n
+		}
+	}
 	result := StepResult{
 		Step:    "detail",
 		OK:      true,
-		Message: fmt.Sprintf("《%s》解析成功，%d 集，线路 %d 条", drama.Title, len(chapters), len(chapters[0].Routes)+1),
+		Message: fmt.Sprintf("《%s》解析成功，%d 集，线路 %d 条", drama.Title, len(chapters), routeCount),
 		Details: map[string]any{
 			"标题":  drama.Title,
 			"集数":  len(chapters),
-			"线路数": len(chapters[0].Routes) + 1,
+			"线路数": routeCount,
 			"封面":  clipString(drama.Cover, 70),
 			"简介":  clipString(drama.Intro, 120),
 			"分类":  drama.Category,

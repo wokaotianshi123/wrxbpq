@@ -112,7 +112,7 @@ func TestCheckGoodRule(t *testing.T) {
 		Label:   "详情页",
 		Content: `<div class="row" style="display: block;"><ul class="list16"><li><a href="/play/1-1-1/">第01集</a></li><li><a href="/play/1-1-2/">第02集</a></li><li><a href="/play/1-1-3/">第03集</a></li><li><a href="/play/1-1-4/">第04集</a></li><li><a href="/play/1-1-5/">第05集</a></li><li><a href="/play/1-1-6/">第06集</a></li></ul></div>`,
 	}, {
-		Label: "播放页",
+		Label:   "播放页",
 		Content: `<script type="text/javascript">var player_aaaa={"flag":"play","encrypt":0}; const config = {url: 'https://cdn.example.com/2026/index.m3u8',autoplay: true}</script>`,
 	}}
 	good := `{
@@ -182,12 +182,12 @@ func TestAnalyzeMacCMSStyleSite(t *testing.T) {
 	t.Logf("\n%s", text)
 	checks := map[string]string{
 		"播放数组建议用 ul 内层容器":  `播放数组 建议 "<ul class=\"stui-content__playlist clearfix\"&&</ul>"`,
-		"多线路指引":              "检测到 3 个「播放线路」标题：这是多线路站",
-		"player_aaaa 省略指引":    "检测到 MacCMS player_aaaa 配置对象：跳转播放链接 建议【整个字段省略不写】",
-		"转义直链找到":              "https://vv.jisuzyv.com/play/abc/index.m3u8",
-		"数组+链接实测":             "截出指向 /vod/ 的可跳转链接",
-		"分集条目原文避开留言":         "第一个分集条目原文",
-		"MacCMS 分页形态":         "/list/{cateId}-2.html",
+		"多线路指引":            "这是多线路站，【必须写 线路数组】",
+		"player_aaaa 省略指引": "检测到 MacCMS player_aaaa 配置对象：跳转播放链接 建议【整个字段省略不写】",
+		"转义直链找到":           "https://vv.jisuzyv.com/play/abc/index.m3u8",
+		"数组+链接实测":          "截出指向 /vod/ 的可跳转链接",
+		"分集条目原文避开留言":       "第一个分集条目原文",
+		"MacCMS 分页形态":      "/list/{cateId}-2.html",
 	}
 	for name, token := range checks {
 		if !strings.Contains(text, token) {
@@ -211,5 +211,40 @@ func TestAnalyzeMacCMSStyleSite(t *testing.T) {
 	}
 	if !foundLink {
 		t.Errorf("链接吃路径前缀的坏规则未被检出")
+	}
+}
+
+// TestAnalyzeTemplateBlock 固化「模板与简写」块：
+// MacCMS 站（/list/2-1.html 形态 + stui 皮肤）必须报命中家族与可省略字段清单；
+// 自定义皮肤站必须给出"不要简写"警示，避免 AI 盲用模板。
+func TestAnalyzeTemplateBlock(t *testing.T) {
+	var items strings.Builder
+	for i := 1; i <= 10; i++ {
+		items.WriteString(`<li><a class="stui-vodlist__thumb" href="/vod/` + string(rune('0'+i)) + `1.html" title="片` + string(rune('0'+i)) + `" data-original="https://img/x.jpg"></a></li>`)
+	}
+	maccmsSamples := []ai.Sample{
+		{Label: "首页 https://a.com/", Content: `<html><body><a href="/list/2-1.html">电视剧</a><a href="/list/1-1.html">电影</a></body></html>`},
+		{Label: "分类页 https://a.com/list/2-1.html", Content: `<html><body class="stui-headers"><div class="stui-vodlist__head">` + items.String() + `</div></body></html>`},
+	}
+	text := Analyze(maccmsSamples)
+	t.Logf("\n%s", text)
+	for _, token := range []string{
+		"命中内置模板家族",
+		"可以省略不写",
+		"页面皮肤探测：stui",
+	} {
+		if !strings.Contains(text, token) {
+			t.Errorf("MacCMS 站指纹缺少 %q", token)
+		}
+	}
+
+	custom := []ai.Sample{
+		{Label: "首页 https://b.com/", Content: `<html><body><a href="/weird/movie/p2/">电影</a></body></html>`},
+		{Label: "分类页 https://b.com/weird/movie/p2/", Content: `<html><body><div class="poster-grid"><span data-id="9"><em>某片</em></span></div><span data-id="8"><em>另片</em></span><span data-id="7"><em>三片</em></span><span data-id="6"><em>四片</em></span><span data-id="5"><em>五片</em></span><span data-id="4"><em>六片</em></span><span data-id="3"><em>七片</em></span></body></html>`},
+	}
+	customText := Analyze(custom)
+	t.Logf("\n%s", customText)
+	if !strings.Contains(customText, "未识别到") && !strings.Contains(customText, "未命中内置模板") {
+		t.Errorf("自定义皮肤站应警示不要简写，实际指纹：\n%s", customText)
 	}
 }

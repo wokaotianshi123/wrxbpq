@@ -16,8 +16,9 @@ import (
 
 // Rule 是一份解析后的 XBPQ 规则。
 type Rule struct {
-	fields map[string]string
-	order  []string
+	fields   map[string]string
+	order    []string
+	declared map[string]bool // 规则原文显式写的字段（模板补齐的不算），供自检跳过逐字校验
 }
 
 // customSourceMaxBytes 规则文本上限（与核心一致）。
@@ -92,7 +93,12 @@ func ParseRule(text string) (Rule, bool) {
 		fields["分类url"] == "" && fields["分类Url"] == "" {
 		return Rule{}, false
 	}
-	rule := Rule{fields: fields, order: order}
+	rule := Rule{fields: fields, order: order, declared: map[string]bool{}}
+	for key, value := range fields {
+		if strings.TrimSpace(value) != "" {
+			rule.declared[key] = true
+		}
+	}
 	rule.applyTemplate()
 	return rule, true
 }
@@ -168,6 +174,17 @@ func (r Rule) Field(names ...string) string {
 		}
 	}
 	return ""
+}
+
+// DeclaredFields 返回规则原文显式声明的字段值（不含模板补齐、不含内部标记）。
+func (r Rule) DeclaredFields() map[string]string {
+	out := make(map[string]string, len(r.declared))
+	for key := range r.declared {
+		if value := r.fields[key]; value != "" {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 // HomeURL 站源主页地址（归一化为 scheme://host/path，无 query/fragment）。

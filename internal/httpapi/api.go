@@ -38,12 +38,13 @@ type probeRequest struct {
 }
 
 type probeResponse struct {
-	OK      bool        `json:"ok"`
-	Samples []ai.Sample `json:"samples,omitempty"`
-	Error   string      `json:"error,omitempty"`
+	OK          bool        `json:"ok"`
+	Samples     []ai.Sample `json:"samples,omitempty"`
+	Fingerprint string      `json:"fingerprint,omitempty"`
+	Error       string      `json:"error,omitempty"`
 }
 
-// HandleProbe 抓取站点样本。
+// HandleProbe 抓取站点样本，并同步产出站点指纹（含模板/简写判定）供前端回显。
 func HandleProbe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, probeResponse{Error: "仅支持 POST"})
@@ -59,7 +60,11 @@ func HandleProbe(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, probeResponse{OK: false, Error: err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, probeResponse{OK: true, Samples: samples})
+	writeJSON(w, http.StatusOK, probeResponse{
+		OK:          true,
+		Samples:     samples,
+		Fingerprint: fingerprint.Analyze(samples),
+	})
 }
 
 // ---- /api/generate ----
@@ -77,11 +82,13 @@ type generateRequest struct {
 }
 
 type generateResponse struct {
-	OK      bool        `json:"ok"`
-	Rule    string      `json:"rule,omitempty"`
-	Raw     string      `json:"raw,omitempty"`
-	Error   string      `json:"error,omitempty"`
-	Samples []ai.Sample `json:"samples,omitempty"`
+	OK          bool        `json:"ok"`
+	Rule        string      `json:"rule,omitempty"`
+	Raw         string      `json:"raw,omitempty"`
+	Error       string      `json:"error,omitempty"`
+	Samples     []ai.Sample `json:"samples,omitempty"`
+	Fingerprint string      `json:"fingerprint,omitempty"`
+	TemplateHit string      `json:"templateHit,omitempty"`
 }
 
 // HandleGenerate 调 AI 生成（或修复）规则。
@@ -106,13 +113,22 @@ func HandleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	samples := request.Samples
-	if len(samples) == 0 && request.Site != "" {
-		probed, err := verify.Probe(r.Context(), request.Site, 0)
-		if err != nil {
-			writeJSON(w, http.StatusOK, generateResponse{OK: false, Error: "站点样本抓取失败: " + err.Error()})
+	fixMode := strings.TrimSpace(request.Rule) != ""
+	if len(samples) == 0 {
+		if !fixMode {
+			// 生成模式强制依赖抓取样本：没有基础数据就不让 AI 凭空猜规则。
+			writeJSON(w, http.StatusOK, generateResponse{OK: false, Error: "必须先点击「抓取样本」获取站点基础数据后再生成规则。"})
 			return
 		}
-		samples = probed
+		// 修复模式允许补抓（前端样本可能因服务重启丢失）。
+		if request.Site != "" {
+			probed, err := verify.Probe(r.Context(), request.Site, 0)
+			if err != nil {
+				writeJSON(w, http.StatusOK, generateResponse{OK: false, Error: "站点样本抓取失败: " + err.Error()})
+				return
+			}
+			samples = probed
+		}
 	}
 	var messages []ai.Message
 	siteFingerprint := fingerprint.Analyze(samples)
@@ -151,7 +167,23 @@ func HandleGenerate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, generateResponse{OK: true, Rule: rule, Raw: content, Samples: samples})
+	writeJSON(w, http.StatusOK, generateResponse{
+		OK:          true,
+		Rule:        rule,
+		Raw:         content,
+		Samples:     samples,
+		Fingerprint: siteFingerprint,
+		TemplateHit: templateHitNames(rule),
+	})
+}
+
+// templateHitNames 从规则文本回读命中的模板家族名（供前端提示"本规则靠哪些模板兜底"）。
+func templateHitNames(ruleText string) string {
+	parsed, ok := xbpq.ParseRule(ruleText)
+	if !ok {
+		return ""
+	}
+	return parsed.TemplateHitNames()
 }
 
 // ExtractRule 从模型回复里剥离 Markdown 代码块与前后废话，取出 JSON。
