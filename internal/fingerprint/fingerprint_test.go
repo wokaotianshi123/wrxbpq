@@ -291,6 +291,128 @@ func TestCheckAbbreviatedRuleRules(t *testing.T) {
 	}
 }
 
+// TestCheckCategoryURLCateIDRule 固化简写第三条铁律：分类url 必须同时含 {cateId} 与 {catePg}。
+// 多分类站缺 {cateId} → 切分类永远打开同一页，必须确定性拦截；单分类站缺 {cateId} 属合法例外。
+func TestCheckCategoryURLCateIDRule(t *testing.T) {
+	samples := []ai.Sample{{
+		Label:   "首页 https://a.com",
+		Content: `<a class="stui-vodlist__thumb" href="/vod/1.html" title="片">片</a>`,
+	}}
+	// 多分类 + 缺 {cateId} + 缺 {catePg} + 相对路径 → 分类url 至少报 {catePg}、{cateId}、域名三条。
+	multiBad := `{"分类url":"https://a.com/list/index.html","分类":"电影$1#电视剧$2","主页url":"https://a.com"}`
+	var missingCateID, missingCatePg bool
+	for _, issue := range Check(multiBad, samples) {
+		if issue.Field != "分类url" {
+			continue
+		}
+		if strings.Contains(issue.Problem, "{cateId}") {
+			missingCateID = true
+		}
+		if strings.Contains(issue.Problem, "{catePg}") {
+			missingCatePg = true
+		}
+	}
+	if !missingCateID {
+		t.Errorf("多分类站缺 {cateId} 应被检出：\n%s", dumpIssues(Check(multiBad, samples)))
+	}
+	if !missingCatePg {
+		t.Errorf("缺 {catePg} 仍应被检出")
+	}
+	// 两个占位齐备 → 分类url 不应报错。
+	good := `{"分类url":"https://a.com/list/{cateId}-{catePg}.html","分类":"电影$1#电视剧$2","主页url":"https://a.com"}`
+	for _, issue := range Check(good, samples) {
+		if issue.Field == "分类url" {
+			t.Errorf("双占位齐备的分类url被误报: %s", issue.Problem)
+		}
+	}
+	// 单分类站缺 {cateId}（ID 不体现在 URL 形态）→ 合法例外，不报。
+	single := `{"分类url":"https://a.com/all/{catePg}.html","分类":"短剧$1","主页url":"https://a.com"}`
+	for _, issue := range Check(single, samples) {
+		if issue.Field == "分类url" && strings.Contains(issue.Problem, "{cateId}") {
+			t.Errorf("单分类站缺 {cateId} 不应误报: %s", issue.Problem)
+		}
+	}
+}
+
+// TestAnalyzeMissingCateIDWarn 固化指纹警示：多分类站实测/推断形态缺 {cateId} 时必须警示补占位。
+// 场景：分页实测通过的模板只带 {catePg}（如 …/hot/{catePg}.html），而分类检测
+// 已实测出多个分类——说明 {cateId} 段没有被形态覆盖，必须提示补上，与 {catePg} 并存。
+func TestAnalyzeMissingCateIDWarn(t *testing.T) {
+	samples := []ai.Sample{
+		{Label: "首页 https://a.com/", Content: `<html><body class="stui-x"><a href="/weird/movie/">电影</a><a href="/weird/tv/">电视剧</a></body></html>`},
+		{Label: "分类检测", Content: "分类检测 结论：通过。\n已实测分类串：\"电影$1#电视剧$2\"（每条都真实抓取过且页面可提出 ≥3 个条目，分类字段从这里逐字取）\n分类url 的 {cateId} 位置（实测）：路径段 \"hot\" 中 \"1\" 一段（如 https://a.com/hot/1.html）"},
+		{Label: "分页实测", Content: "分页实测 结论：通过\n实测分类url模板：\"https://a.com/hot/{catePg}.html\"\n第2页实测地址：https://a.com/hot/2.html\n与第1页条目重合仅 0%（第1页 6 条 / 第2页 6 条），确认翻页生效。"},
+	}
+	text := Analyze(samples)
+	t.Logf("\n%s", text)
+	if !strings.Contains(text, "缺少分类占位 {cateId}") {
+		t.Errorf("形态缺 {cateId} 应给出警示，实际指纹：\n%s", text)
+	}
+}
+
+// TestRouteEvidenceDOMGroupsCatchMissedRoutes 固化 DOM 实测线路证据的价值：
+// 详情页两条线路的 ul 容器 class 各不相同（playlist-dp / playlist-ali），
+// 字符串投票众数只认一个锚点、独立截取只截出 1 段（containers=1），
+// 旧逻辑会漏判单线路 → 漏写 线路数组。DOM 分组必须数出 2 组，
+// detailBlock 报【必须写 线路数组】，Check 对没写线路数组的规则报确定性遗漏。
+func TestRouteEvidenceDOMGroupsCatchMissedRoutes(t *testing.T) {
+	detail := `<html><body class="stui-x"><h1>片名</h1>` +
+		`<ul class="stui-content__playlist playlist-dp clearfix itemcol"><li><a href="/play/9-1-1.html">第01集</a></li><li><a href="/play/9-1-2.html">第02集</a></li></ul>` +
+		`<ul class="stui-content__playlist playlist-ali clearfix itemcol-3"><li><a href="/play/9-2-1.html">第01集</a></li><li><a href="/play/9-2-2.html">第02集</a></li></ul>` +
+		`</body></html>`
+	ev := routeEvidenceOf(detail)
+	if ev.ulGroups != 2 {
+		t.Errorf("DOM 分组应数出 2 条线路，实际 %d（明细 %s）", ev.ulGroups, ev.ulGroupDetail)
+	}
+	if !ev.multi() {
+		t.Errorf("class 逐线路不同的双线路站必须判定为多线路（containers=%d ulGroups=%d）", ev.containers, ev.ulGroups)
+	}
+	samples := []ai.Sample{
+		{Label: "首页 https://a.com/", Content: `<a class="stui-x" href="/vod/9.html">片</a>`},
+		{Label: "详情页 https://a.com/vod/9.html", Content: detail},
+	}
+	text := Analyze(samples)
+	t.Logf("\n%s", text)
+	if !strings.Contains(text, "【必须写 线路数组】") {
+		t.Errorf("指纹应提示必须写 线路数组，实际：\n%s", text)
+	}
+	// ul 前缀相同（class 首段一致）时 DOM 锚点建议可直接给出
+	if ev.containerAnchor != "" && !strings.Contains(text, "DOM 实测并列容器") {
+		t.Errorf("锚点可覆盖全部线路组时应输出 DOM 实测容器建议，实际锚点 %q", ev.containerAnchor)
+	}
+	// 没写 线路数组 的规则必须被 Check 回喂修复
+	ruleNoRoute := `{"主页url":"https://a.com","播放数组":"<ul class=\"stui-content__playlist playlist-dp clearfix itemcol\"&&</ul>","播放列表":"<li","播放标题":">&&</a>","播放链接":"href=\"&&\""}`
+	issues := Check(ruleNoRoute, samples)
+	found := false
+	for _, issue := range issues {
+		if issue.Field == "播放数组" && strings.Contains(issue.Problem, "线路数组") {
+			found = true
+			t.Logf("检出 [%s] %s", issue.Field, issue.Problem)
+		}
+	}
+	if !found {
+		t.Errorf("漏写 线路数组 的多线路规则应被检出，实际问题：%s", dumpIssues(issues))
+	}
+}
+
+// TestRouteEvidenceDOMGroupsSingleRouteNoFalsePositive 固化反向不误报：
+// 单线路站（一个 ul 一串分集）DOM 分组只算 1 组，不得催 线路数组。
+func TestRouteEvidenceDOMGroupsSingleRouteNoFalsePositive(t *testing.T) {
+	detail := `<html><body><ul class="playlist"><li><a href="/play/9-1-1.html">第01集</a></li><li><a href="/play/9-1-2.html">第02集</a></li><li><a href="/play/9-1-3.html">第03集</a></li></ul></body></html>`
+	ev := routeEvidenceOf(detail)
+	if ev.multi() {
+		t.Errorf("单线路站不应判多线路：%+v", ev)
+	}
+}
+
+func dumpIssues(issues []CheckIssue) string {
+	var b strings.Builder
+	for _, issue := range issues {
+		b.WriteString("[" + issue.Field + "] " + issue.Problem + "\n")
+	}
+	return b.String()
+}
+
 // TestAnalyzeTemplateBlockPaging 固化指纹对简写铁律的提示：
 // 推断形态缺 {catePg} 时必须警示；相对形态必须给出「省略主页url则写绝对地址」的示例。
 func TestAnalyzeTemplateBlockPaging(t *testing.T) {

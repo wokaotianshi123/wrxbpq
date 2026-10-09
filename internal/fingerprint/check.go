@@ -27,13 +27,18 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 		issues = append(issues, CheckIssue{Field: field, Problem: problem})
 	}
 
-	// 简写两条铁律（实测踩坑，确定性拦截）：
+	// 简写三条铁律（实测踩坑，确定性拦截）：
 	// ① 省了 主页url 时 分类url 必须含域名——相对路径 jar 定位不到站点，直接识别失败；
-	// ② 分类url 必须写分页占位 {catePg}——否则第 2 页和第 1 页是同一个 URL，paging 验证必挂。
+	// ② 分类url 必须写分页占位 {catePg}——否则第 2 页和第 1 页是同一个 URL，paging 验证必挂；
+	// ③ 分类url 必须写分类占位 {cateId}——声明 ≥2 个分类时，缺了它所有分类都打开同一页，
+	//    catalog 切分类必串档（单分类站 ID 不体现在 URL 形态属合法例外，不报）。
 	category := rule.Field("分类url", "分类Url")
 	if rule.DeclaresField("分类url") || category != "" {
 		if !strings.Contains(category, "{catePg}") {
 			add("分类url", "缺少分页占位 {catePg}：翻页会一直停在第 1 页，验证 paging 步骤必挂。{catePg} 的具体形态（路径段/文件名段/查询参数）必须由真实拼接抓取两页比对来确认——先看指纹「分页实测」结论并照抄；没有实测结论时按样本分页链接写最可信的一种，以 paging 验证通过为准")
+		}
+		if !strings.Contains(category, "{cateId}") && len(rule.Categories()) >= 2 {
+			add("分类url", "缺少分类占位 {cateId}：规则声明了多个分类，分类url 里却没有 {cateId} 位置——切分类会永远打开同一个页面（catalog 串档）。把指纹「分类检测」标出的 {cateId} 实测位置（路径段或 query 参数）逐字放进 分类url 对应段，与 {catePg} 同时存在，二者缺一不可")
 		}
 		if !strings.HasPrefix(category, "http") && rule.Field("主页url", "首页url", "请求") == "" {
 			add("分类url", "规则省略了 主页url，分类url 就必须写含域名的绝对地址（https://站点域名/…）——相对路径无法定位站点，XBPQ 识别失败")
@@ -101,15 +106,15 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 					}
 				}
 			}
-			if ev.titles < 2 && containerRoutes < 2 && ev.hlTabs < 2 && ev.dropdowns < 2 {
+			if ev.titles < 2 && containerRoutes < 2 && ev.ulGroups < 2 && ev.hlTabs < 2 && ev.dropdowns < 2 {
 				add("线路数组", "线路数组 与 播放数组 起始锚点相同且样本未见多线路（无「播放线路/播放源」标题、线路容器独立截不出 ≥2 段、无 ≥2 个 hl 按钮/dropdown 资源）：会把同一线路的每一行拆成重复\"线路\"，单线路站必须删除 线路数组（多线路的锚点应是每条线路的容器标题行）")
 			}
 		}
 	} else if ev.multi() && !strings.HasPrefix(rule.Field("播放数组"), "j:") {
-		// 反向校验：样本明显是多线路站（任一证据 ≥2），规则却没写 线路数组——
+		// 反向校验：样本明显是多线路站（任一证据 ≥2，含 DOM 实测分集分组），规则却没写 线路数组——
 		// 分集数会变成所有线路之和且无法切换线路，属确定性遗漏，直接报出回喂 AI。
-		add("播放数组", fmt.Sprintf("详情页样本检测到多线路（最强证据 %d 条：文字标题 %d、分集容器独立 %d 段、hl 按钮 %d、dropdown 资源 %d）但规则没写 线路数组：会把多条线路的分集混在一起、且无法切换线路。按指纹提示的形态补 线路数组（%s）",
-			ev.max(), ev.titles, ev.containers, ev.hlTabs, ev.dropdowns, routeFormHint(ev)))
+		add("播放数组", fmt.Sprintf("详情页样本检测到多线路（最强证据 %d 条：文字标题 %d、分集容器独立 %d 段、DOM 实测分集列表分组 %s、hl 按钮 %d、dropdown 资源 %d）但规则没写 线路数组：会把多条线路的分集混在一起、且无法切换线路。按指纹提示的形态补 线路数组（%s）",
+			ev.max(), ev.titles, ev.containers, ev.ulGroupDetail, ev.hlTabs, ev.dropdowns, routeFormHint(ev)))
 	}
 
 	// 提取合理性：数组+链接 组合喂给真实截取引擎，截出值"全是裸 ID"（无 / 无 http）说明

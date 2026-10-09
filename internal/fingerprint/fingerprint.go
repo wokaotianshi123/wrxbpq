@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/wrxbpq/wrxbpq/internal/ai"
@@ -243,12 +244,21 @@ func templateBlock(home, catalog, detail, origin, paging, category string) strin
 	if tpl != "" && !strings.Contains(tpl, "{catePg}") && !pagingConfirmed {
 		lines = append(lines, "⚠ 推断形态缺少分页占位 {catePg}——【分类url 必须补上 {catePg}】，否则验证第 2 页与第 1 页相同、paging 步骤必挂。{catePg} 的具体形态（/2/、-2.html、?pg=2…）要靠真实拼接测试决定，不能只凭长相推断：请对照样本里的下一页链接，并用 paging 验证确认翻页内容确实变化。")
 	}
+	// 缺 {cateId} 的警示：多分类站没有 {cateId} 位置时，切分类永远打开同一页。
+	if tpl != "" && !strings.Contains(tpl, "{cateId}") && strings.Contains(category, "已实测分类串") {
+		lines = append(lines, "⚠ 推断形态缺少分类占位 {cateId}——站点有多个分类时【分类url 必须含 {cateId}】（位置以「分类检测」标出的 {cateId} 实测段为准），与 {catePg} 同时存在；否则切分类永远打开同一个页面，catalog 串档。")
+	}
 	if tpl == "" {
 		lines = append(lines, "分类链接形态：首页未识别到标准分类链接，无法套用内置模板——按样本全字段手写。")
 		return strings.Join(lines, "\n")
 	}
 	if pagingConfirmed && pagingTemplate != "" {
-		suffix := "——这是真实拼接+抓取+两页比对确认过的模板（分类ID 段已还原为 {cateId}），逐字照抄，不要再按静态推断改形态。"
+		suffix := "——这是真实拼接+抓取+两页比对确认过的模板，页码段逐字照抄，不要再按静态推断改形态。"
+		if strings.Contains(tpl, "{cateId}") {
+			suffix = "——这是真实拼接+抓取+两页比对确认过的模板（分类ID 段已还原为 {cateId}），逐字照抄，不要再按静态推断改形态。"
+		} else {
+			suffix = "——页码形态已经真实拼接+抓取+两页比对确认；⚠ 但该模板里【没有 {cateId}】，多分类站必须按「分类检测」实测位置补上 {cateId}（补进对应段后 {cateId} 与 {catePg} 并存），否则切分类永远打开同一页。"
+		}
 		if categoryTplUsed {
 			suffix = "——页码形态经真实拼接+抓取+两页比对确认，{cateId} 位置来自分类实测，逐字照抄，不要再按静态推断改形态。"
 		}
@@ -797,19 +807,22 @@ func stripTagsLine(s string) string {
 	return collapseSpace(strings.TrimSpace(s))
 }
 
-// routeEvidence 详情页样本的多线路四路证据。
+// routeEvidence 详情页样本的多线路证据。
 type routeEvidence struct {
-	titles     int      // 「播放线路/播放源/线路 N」文字标题数
-	containers int      // 分集列表容器独立截出的段数（每段含分集链接）
-	hlTabs     int      // hl 皮肤线路按钮数
-	dropdowns  int      // myui data-dropdown-value 数
-	dropNames  []string // 下拉资源名（示例用）
-	tabNames   []string // hl 按钮文字（示例用）
+	titles          int      // 「播放线路/播放源/线路 N」文字标题数
+	containers      int      // 分集列表容器独立截出的段数（每段含分集链接）
+	ulGroups        int      // DOM 实测：按分集链接最近列表父节点分组的线路数（不受 class 逐线路不同影响）
+	ulGroupDetail   string   // 分组明细（如 "3 组 [2/2/2]"），供指纹回显
+	containerAnchor string   // DOM 实测给出的 线路数组 建议锚点（父节点开始标签前缀）
+	hlTabs          int      // hl 皮肤线路按钮数
+	dropdowns       int      // myui data-dropdown-value 数
+	dropNames       []string // 下拉资源名（示例用）
+	tabNames        []string // hl 按钮文字（示例用）
 }
 
 func (r routeEvidence) max() int {
 	m := r.titles
-	for _, v := range []int{r.containers, r.hlTabs, r.dropdowns} {
+	for _, v := range []int{r.containers, r.ulGroups, r.hlTabs, r.dropdowns} {
 		if v > m {
 			m = v
 		}
@@ -817,10 +830,14 @@ func (r routeEvidence) max() int {
 	return m
 }
 
-// multi 任一证据 ≥2 即认定多线路站。
+// max 任一证据 ≥2 即认定多线路站。
 func (r routeEvidence) multi() bool { return r.max() >= 2 }
 
 // routeEvidenceOf 计算详情页样本的全部多线路证据。容器段数复用 voteEpisodeContainer。
+// ulGroups 是 DOM 实测证据：按分集链接的最近列表父节点逐页分组统计线路数，
+// 不受「各线路容器 class 不一致、字符串截取只认投票众数」的限制——很多站
+// 线路容器 class 带逐线路后缀或嵌套结构不同，voteEpisodeContainer 只截得出 1 段，
+// 但 DOM 上分明有 2+ 个列表各挂一串分集链接，这类漏判由 ulGroups 兜住。
 func routeEvidenceOf(body string) routeEvidence {
 	if body == "" {
 		return routeEvidence{}
@@ -847,7 +864,128 @@ func routeEvidenceOf(body string) routeEvidence {
 			}
 		}
 	}
+	if groups, anchor := episodeRouteGroups(body); len(groups) > 0 {
+		ev.ulGroups = len(groups)
+		counts := make([]string, len(groups))
+		for index, count := range groups {
+			counts[index] = strconv.Itoa(count)
+		}
+		ev.ulGroupDetail = fmt.Sprintf("%d 组 [%s]", len(groups), strings.Join(counts, "/"))
+		// 锚点建议只在比字符串截取更强、且覆盖全部线路组时给出
+		if len(groups) > ev.containers {
+			ev.containerAnchor = anchor
+		}
+	}
 	return ev
+}
+
+// episodeRouteGroups DOM 实测：解析详情页，把每条 /play/ 分集链接归到它
+// 「最近的列表类祖先」（ul/ol 优先，其次 dd、带 class 的 div 容器），
+// 按祖先节点去重分组，返回（各组分集数——已剔除 <2 集的噪声组、建议的 线路数组 锚点）。
+// 这是"分析具体页面再定线路"的核心：分组基于真实 DOM 结构而非字符串锚点众数，
+// 每个线路容器 class 不同、或外层 div 与内层 ul 嵌套错位时也能数对线路。
+func episodeRouteGroups(body string) ([]int, string) {
+	if !playHrefPattern.MatchString(body) {
+		return nil, ""
+	}
+	document, err := html.Parse(strings.NewReader(body))
+	if err != nil {
+		return nil, ""
+	}
+	var order []*html.Node
+	counts := map[*html.Node]int{}
+	anchorOf := map[*html.Node]string{}
+	var walk func(node *html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.ElementNode && node.Data == "a" {
+			for _, attr := range node.Attr {
+				if strings.EqualFold(attr.Key, "href") && playHrefPattern.MatchString(`href="`+attr.Val+`"`) {
+					group := episodeRouteAncestor(node)
+					if group != nil {
+						if counts[group] == 0 {
+							order = append(order, group)
+							anchorOf[group] = containerAnchorOf(group)
+						}
+						counts[group]++
+					}
+					break
+				}
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(document)
+	var groups []int
+	anchorCover := map[string]int{} // 锚点 → 使用该锚点的线路组数
+	for _, node := range order {
+		if counts[node] < 2 {
+			continue // 单集容器多为推荐位/热播榜混入的分集链接，不算线路
+		}
+		groups = append(groups, counts[node])
+		if anchor := anchorOf[node]; anchor != "" {
+			anchorCover[anchor]++
+		}
+	}
+	// 线路数组 锚点建议只在"该锚点覆盖全部线路组"时给出（class 逐组不同的站
+	// 锚点各不相同 → 不给锚点，回退文字形态描述，避免给出截不全的写法）。
+	if len(groups) >= 2 {
+		bestAnchor, bestCover := "", 0
+		for anchor, cover := range anchorCover {
+			if cover > bestCover || (cover == bestCover && anchor < bestAnchor) {
+				bestAnchor, bestCover = anchor, cover
+			}
+		}
+		if bestCover == len(groups) {
+			return groups, bestAnchor
+		}
+	}
+	return groups, ""
+}
+
+// episodeRouteAncestor 找分集链接所属的线路容器：沿父链向上，
+// 第一个 ul/ol 即线路容器（分集列表的天然容器）；没有列表层时退到 dd
+// （MacCMS 旧模板每线路一个 dd）或带 class 的最小 div 包装层。
+// 到 body/html 仍未命中返回 nil（裸链接不参与分组）。
+func episodeRouteAncestor(link *html.Node) *html.Node {
+	firstDiv := (*html.Node)(nil)
+	for node := link.Parent; node != nil; node = node.Parent {
+		if node.Type != html.ElementNode {
+			continue
+		}
+		switch node.Data {
+		case "ul", "ol":
+			return node
+		case "dd":
+			return node
+		case "div":
+			if firstDiv == nil {
+				if _, hasClass := attrOf(node, "class"); hasClass {
+					firstDiv = node
+				}
+			}
+		case "body", "html":
+			return firstDiv
+		}
+	}
+	return firstDiv
+}
+
+// containerAnchorOf 由线路容器节点构造可直接写进 线路数组 的开始锚点前缀。
+// 复用 suggestPrefix 语义：<ul class="stui-content__playlist clearfix"（去尾 >）。
+func containerAnchorOf(node *html.Node) string {
+	var builder strings.Builder
+	builder.WriteString("<")
+	builder.WriteString(node.Data)
+	if class, ok := attrOf(node, "class"); ok && strings.TrimSpace(class) != "" {
+		builder.WriteString(` class="` + strings.TrimSpace(class) + `"`)
+	} else if id, ok := attrOf(node, "id"); ok && strings.TrimSpace(id) != "" {
+		builder.WriteString(` id="` + strings.TrimSpace(id) + `"`)
+	} else {
+		return ""
+	}
+	return builder.String()
 }
 
 func containsFold(list []string, want string) bool {
@@ -866,11 +1004,23 @@ func routeFormHint(ev routeEvidence) string {
 		return "hl 皮肤：线路数组 锚每个 hl-tabs-btn 按钮，播放数组 锚分集面板容器——两者不同锚点"
 	case ev.dropdowns >= 2:
 		return "myui dropdown：线路标题=\"data-dropdown-value=\\\"&&\\\"\"，线路数组 锚每条 dropdown-menu 的 <li>"
-	case ev.containers >= 2:
-		return "并列容器：线路数组 与 播放数组 用同一列表容器锚点，引擎按容器段切分"
+	case ev.containerAnchor != "":
+		return "DOM 实测容器形态：线路数组 与 播放数组 用同一锚点 \"" + ev.containerAnchor + "&&</" + firstTagOfAnchor(ev.containerAnchor) + ">\"（详情页实测该容器共截出 " + ev.ulGroupDetail + "）"
+	case ev.containers >= 2 || ev.ulGroups >= 2:
+		return "并列容器：线路数组 与 播放数组 用同一列表容器锚点，引擎按容器段切分（详情页 DOM 实测 " + ev.ulGroupDetail + "）"
 	default:
 		return "文字标题形态：线路数组 锚每条线路容器（与 播放数组 同锚点），线路标题 截「播放源/播放线路 N」标题行"
 	}
+}
+
+// firstTagOfAnchor 取容器锚点 "<ul class=\"…\"" 里的标签名（ul/ol/div/dd）。
+func firstTagOfAnchor(anchor string) string {
+	trimmed := strings.TrimPrefix(anchor, "<")
+	end := strings.IndexAny(trimmed, " >")
+	if end <= 0 {
+		return ""
+	}
+	return trimmed[:end]
 }
 
 // voteEpisodeContainer 找分集列表容器：对每条分集链接取"其前最近的 ul/ol（优先）或 div"
@@ -972,8 +1122,8 @@ func detailBlock(body string) string {
 		// （每段含分集链接才算一条线路）；③hl 皮肤线路按钮数；④myui data-dropdown-value 数。
 		// 很多站没有"播放线路"字样但线路容器并排多个，只数文字会漏判。
 		if ev.multi() {
-			lines = append(lines, fmt.Sprintf("  检测到多线路站（最强证据 %d 条；文字标题 %d、分集容器独立截出 %d 段、hl 线路按钮 %d、dropdown 资源 %d），【必须写 线路数组】。",
-				ev.max(), ev.titles, ev.containers, ev.hlTabs, ev.dropdowns))
+			lines = append(lines, fmt.Sprintf("  检测到多线路站（最强证据 %d 条；文字标题 %d、分集容器独立截出 %d 段、DOM 实测分集列表分组 %s、hl 线路按钮 %d、dropdown 资源 %d），【必须写 线路数组】。",
+				ev.max(), ev.titles, ev.containers, ev.ulGroupDetail, ev.hlTabs, ev.dropdowns))
 			switch {
 			case ev.hlTabs >= 2:
 				lines = append(lines, fmt.Sprintf("  → hl(海蓝)皮肤：线路按钮与分集面板分离，线路数组 与 播放数组 【不是】同锚点——线路数组=\"class=\\\"hl-tabs-btn hl-slide-swiper\\\"&&</a>\"，线路标题=\">&&</a>\"（按钮文字是\\\"线路1\\\"这类占位时加 [替换:线路1>>资源名]，需要指定顺序再加 [排序:资源B>资源A]）；播放数组 用分集面板容器（data-value 指向的 id，如 \"id=\\\"hl-plays-list\\\"&&</div>\"）。按钮文字实测：%s。",
@@ -981,9 +1131,12 @@ func detailBlock(body string) string {
 			case ev.dropdowns >= 2:
 				lines = append(lines, fmt.Sprintf("  → myui dropdown 形态：线路标题=\"data-dropdown-value=\\\"&&\\\"\"（资源名实测：%s）；线路数组 锚每条 dropdown-menu 的 <li> 容器（对照详情页原文逐字写）。",
 					clipToken(strings.Join(ev.dropNames, "、"), 120)))
-			case ev.containers >= 2:
-				lines = append(lines, fmt.Sprintf("  → 并列容器形态：线路数组 与 播放数组 用同一个列表容器锚点（%s&&%s）即可，引擎按容器段切分线路；每条线路有容器标题行（如 <h3 class=\"title\">播放源…、data-dropdown-value）时再写 线路标题 截它。",
-					escapeGo(prefix), endTag))
+			case ev.containerAnchor != "":
+				lines = append(lines, fmt.Sprintf("  → DOM 实测并列容器（%s）：线路数组 与 播放数组 用同一个列表容器锚点 \"%s&&</%s>\" 即可，引擎按容器段切分线路——这是逐页解析真实 DOM 得出的分组，即使各线路容器附加属性不同也适用；每条线路有容器标题行（如 <h3 class=\\\"title\\\">播放源…、data-dropdown-value）时再写 线路标题 截它。",
+					ev.ulGroupDetail, escapeGo(ev.containerAnchor), firstTagOfAnchor(ev.containerAnchor)))
+			case ev.containers >= 2 || ev.ulGroups >= 2:
+				lines = append(lines, fmt.Sprintf("  → 并列容器形态：线路数组 与 播放数组 用同一个列表容器锚点（%s&&%s）即可，引擎按容器段切分线路；每条线路有容器标题行（如 <h3 class=\"title\">播放源…、data-dropdown-value）时再写 线路标题 截它。DOM 实测分组 %s——若按该锚点只截得出 1 段而分组显示 ≥2 组，说明各线路容器 class 不同，要对照详情页原文给每条线路容器找共同前缀。",
+					escapeGo(prefix), endTag, ev.ulGroupDetail))
 			default:
 				lines = append(lines, "  → 文字标题形态：线路标题 截「播放线路 N」标题行；线路数组 按官方样例用每条线路的容器锚点（与 播放数组 同锚点即可）。")
 			}

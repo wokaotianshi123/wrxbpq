@@ -21,8 +21,10 @@ XBPQ jar 与本引擎都内置模板：按「分类url」形态识别站点家�
    以及样本 HTML 与模板默认链对不上的字段——那些必须按样本逐字实测写。
 3. 【简写三条铁律，违反必翻车】：
    a) 省略 主页url 时，分类url 必须写含域名的绝对地址（https://站点域名/…）——相对路径 jar 定位不到站点，直接识别失败。
-   b) 分类url 必须写分页占位 {catePg}——缺了它翻页永远停在第 1 页，paging 检测必挂。
-      {catePg} 的【形态】（/{catePg}/、-{catePg}.html、?pg={catePg}…）必须以指纹「分页实测」结论为准：
+   b) 分类url 必须同时含分类占位 {cateId} 和分页占位 {catePg}——缺 {catePg} 翻页永远停在第 1 页，
+      paging 检测必挂；缺 {cateId} 切分类永远打开同一个页面，catalog 串档必挂（规则声明了 ≥2 个分类时）。
+      {cateId} 放哪一段以指纹「分类检测」实测位置为准，{catePg} 的【形态】（/{catePg}/、-{catePg}.html、?pg={catePg}…）
+      必须以指纹「分页实测」结论为准：
       实测通过 → 照抄实测模板（页码数字替换处写 {catePg}），禁止改成别的形态；
       没有实测结论 → 按样本分页链接形态写最可信的一种，并在验证 paging 失败时逐个换形态重试，
       形态对错只有"拼出来真实抓取比对两页内容"才能判定，不能凭长相推断。
@@ -41,7 +43,8 @@ XBPQ jar 与本引擎都内置模板：按「分类url」形态识别站点家�
 - 主页url    站点首页绝对地址（模板可推导，简写时可省）
 - 请求头     UA 字符串，采集站通常需要
 - 分类       "名称$ID#名称$ID"，如 "电影$1#电视剧$2#综艺$3#动漫$4"
-- 分类url    分类页模板，占位符 {cateId}（分类 ID）、{catePg}（页码，【必写】，缺了 paging 必挂）；
+- 分类url    分类页模板，占位符 {cateId}（分类 ID，多分类站【必写】，缺了切分类全开同一页）、{catePg}（页码，【必写】，缺了 paging 必挂）；
+             两个占位必须同时出现在同一个 分类url 里；
              省掉 主页url 时必须写含域名的绝对地址 https://站点域名/…；
              筛选占位符 {area} {class} {year} {by} 写进模板即自动开启筛选；
              {lang} {letter} 支持差，【不要写】（写了筛选会坏）
@@ -148,6 +151,7 @@ func BuildGenerateMessages(siteURL string, samples []Sample, notes, siteFingerpr
 	}
 	builder.WriteString("样本里的「分页实测」条目是服务端【真实拼接第 2 页 → 抓取 → 与第 1 页比对条目】后的结论：\n")
 	builder.WriteString("它给出实测通过的 分类url 模板（页码数字处换成 {catePg}）。分类url 的页码形态一律以它为准照抄，禁止按静态长相另猜形态。\n")
+	builder.WriteString("分类url 必须【同时】含 {cateId} 与 {catePg} 两个占位——缺 {catePg} 翻页必挂，缺 {cateId} 多分类切档必挂，自检会逐项拦截。\n")
 	builder.WriteString("样本里的「分类检测」条目是服务端【逐个真实抓取导航分类链接 → 看页面能否提出条目 → 比对不同 ID 页面是否相同】后的结论：\n")
 	builder.WriteString("「已实测分类串」逐字写进 分类 字段，「实测失败分类」不得写入，{cateId} 按它标的位置放进 分类url——分类 ID 真假以它为准，禁止拿导航扒的数字直接照抄。\n\n")
 	if fp := strings.TrimSpace(siteFingerprint); fp != "" {
@@ -190,7 +194,7 @@ func BuildFixMessages(siteURL, ruleJSON string, problems []string, samples []Sam
 	builder.WriteString("1. 对照上面「条目样本」检查 数组/二次截取 的边界是否把 链接/标题 要用的关键串截掉了；数组框住完整条目即可，具体值交给字段截取。\n")
 	builder.WriteString("2. 若问题出在 detail/play 步骤，对照「详情页样本」里分集容器的真实 HTML 重写 播放数组/播放列表/播放标题/播放链接；播放数组 起始锚点不要带闭合的 >（真实标签常带 style= 等额外属性）；stui/MacCMS 模板要用内层 ul（…playlist…&&</ul>），别用外层 div&&</div>。单线路站不要写 线路数组；指纹确认多线路时 线路数组 与 播放数组 同锚点即可。若指纹提示 player_aaaa 站，删掉 跳转播放链接 字段交给引擎兜底。\n")
 	builder.WriteString("3. 简写过度导致某字段截不到（模板默认与样本皮肤不符）：只把坏的那个字段按样本 HTML 逐字补写，其它可省字段继续省——不要退化成全字段堆砌。\n")
-	builder.WriteString("4. 若 paging（翻页）失败或第 2 页与第 1 页相同：多半是 分类url 漏写分页占位 {catePg}——补上它；若是 catalog/detail 直接失败且规则省了 主页url：把 分类url 改成含域名的绝对地址 https://站点域名/…。\n")
+	builder.WriteString("4. 若 paging（翻页）失败或第 2 页与第 1 页相同：多半是 分类url 漏写分页占位 {catePg}——补上它；若切分类后各分类目录内容相同（串档）：多半是 分类url 漏写 {cateId}——按指纹「分类检测」标的位置补上它（{cateId} 与 {catePg} 必须同时存在）。若是 catalog/detail 直接失败且规则省了 主页url：把 分类url 改成含域名的绝对地址 https://站点域名/…。\n")
 	builder.WriteString("5. 只改有问题的字段，其它字段保持原样，输出修正后的完整规则。\n")
 	builder.WriteString("6. 只输出 JSON，不要解释。\n")
 	if len(samples) > 0 {
