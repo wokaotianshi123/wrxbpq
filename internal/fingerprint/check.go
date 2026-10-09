@@ -26,6 +26,19 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 		issues = append(issues, CheckIssue{Field: field, Problem: problem})
 	}
 
+	// 简写两条铁律（实测踩坑，确定性拦截）：
+	// ① 省了 主页url 时 分类url 必须含域名——相对路径 jar 定位不到站点，直接识别失败；
+	// ② 分类url 必须写分页占位 {catePg}——否则第 2 页和第 1 页是同一个 URL，paging 验证必挂。
+	category := rule.Field("分类url", "分类Url")
+	if rule.DeclaresField("分类url") || category != "" {
+		if !strings.Contains(category, "{catePg}") {
+			add("分类url", "缺少分页占位 {catePg}：翻页会一直停在第 1 页，验证 paging 步骤必挂。对照样本分页链接补上真实形态，如 /vodshow/{cateId}-{catePg}.html、…/type/{cateId}/{catePg}/…、查询串 …&pg={catePg}")
+		}
+		if !strings.HasPrefix(category, "http") && rule.Field("主页url", "首页url", "请求") == "" {
+			add("分类url", "规则省略了 主页url，分类url 就必须写含域名的绝对地址（https://站点域名/…）——相对路径无法定位站点，XBPQ 识别失败")
+		}
+	}
+
 	patternFields := []string{"数组", "二次截取", "标题", "链接", "列表图片", "搜索图片", "副标题",
 		"播放数组", "播放标题", "播放链接", "跳转播放链接", "线路数组", "影片名称", "简介", "封面", "类型", "状态", "主演", "导演"}
 	for _, name := range patternFields {

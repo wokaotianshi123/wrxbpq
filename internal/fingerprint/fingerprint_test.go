@@ -248,3 +248,61 @@ func TestAnalyzeTemplateBlock(t *testing.T) {
 		t.Errorf("自定义皮肤站应警示不要简写，实际指纹：\n%s", customText)
 	}
 }
+
+// TestCheckAbbreviatedRuleRules 固化两条简写铁律的确定性拦截：
+// ① 省 主页url 时 分类url 必须含域名；② 分类url 必须写 {catePg} 分页占位。
+func TestCheckAbbreviatedRuleRules(t *testing.T) {
+	samples := []ai.Sample{{
+		Label:   "首页 https://www.6789ysw.com",
+		Content: `<a class="stui-vodlist__thumb" href="/vodshow/1-----------.html" title="片">片</a>`,
+	}}
+	// 缺 {catePg} 的相对分类url（无主页url）→ 两条都应报。
+	bad := `{"分类url":"/index.php/vod/show/id/{cateId}.html","分类":"电影$1#电视剧$2"}`
+	issues := Check(bad, samples)
+	var categoryIssues int
+	for _, issue := range issues {
+		if issue.Field == "分类url" {
+			categoryIssues++
+			t.Logf("检出 [%s] %s", issue.Field, issue.Problem)
+		}
+	}
+	if categoryIssues != 2 {
+		t.Errorf("相对路径且缺 {catePg} 应报 2 条分类url问题，实际 %d 条", categoryIssues)
+	}
+	// 合法简写：绝对地址 + {catePg} → 分类url 不应被报。
+	good := `{"分类url":"https://www.6789ysw.com/index.php/vod/show/id/{cateId}/page/{catePg}.html","分类":"电影$1#电视剧$2"}`
+	for _, issue := range Check(good, samples) {
+		if issue.Field == "分类url" {
+			t.Errorf("合法简写规则的分类url被误报: %s", issue.Problem)
+		}
+	}
+	// 写了 主页url 时，相对 分类url 合法，但缺 {catePg} 仍应报。
+	withHome := `{"主页url":"https://www.6789ysw.com","分类url":"/index.php/vod/show/id/{cateId}.html","分类":"电影$1"}`
+	var missing bool
+	for _, issue := range Check(withHome, samples) {
+		if issue.Field == "分类url" && strings.Contains(issue.Problem, "{catePg}") {
+			missing = true
+		}
+	}
+	if !missing {
+		t.Errorf("带主页url但缺 {catePg} 仍应检出分页问题")
+	}
+}
+
+// TestAnalyzeTemplateBlockPaging 固化指纹对简写铁律的提示：
+// 推断形态缺 {catePg} 时必须警示；相对形态必须给出「省略主页url则写绝对地址」的示例。
+func TestAnalyzeTemplateBlockPaging(t *testing.T) {
+	// /list/2.html（plain 形态）→ 推断出的模板缺 {catePg}。
+	samples := []ai.Sample{
+		{Label: "首页 https://a.com/", Content: `<html><body><a href="/list/2.html">电视剧</a><a class="stui-headers-x" href="/list/1.html">电影</a></body></html>`},
+		{Label: "分类页 https://a.com/list/2.html", Content: `<html><body class="stui-headers"><div class="stui-vodlist__head"><li><a class="stui-vodlist__thumb" href="/v/1.html" title="片A"></a></li></div></body></html>`},
+	}
+	text := Analyze(samples)
+	t.Logf("\n%s", text)
+	if !strings.Contains(text, "必须补上 {catePg}") {
+		t.Errorf("缺分页形态应警示 {catePg}，实际指纹：\n%s", text)
+	}
+	if !strings.Contains(text, "https://a.com/list/") {
+		t.Errorf("相对分类形态应给出含域名的绝对地址示例，实际指纹：\n%s", text)
+	}
+}

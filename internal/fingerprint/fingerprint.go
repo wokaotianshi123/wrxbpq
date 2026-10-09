@@ -23,11 +23,12 @@ func Analyze(samples []ai.Sample) string {
 	}
 	detail := pick(samples, "详情页")
 	play := pick(samples, "播放页")
+	origin := sampleOrigin(samples)
 
 	var out []string
 	out = append(out, "【站点指纹】以下锚点由服务端从真实页面样本里解析，并统计过出现次数。")
 	out = append(out, "规则里的 pattern 一律照抄指纹中的锚点原文（逐字符，含空格与引号），禁止凭印象改写；指纹没覆盖的字段再回到样本原文里逐字复制。")
-	if block := templateBlock(home, catalog, detail); block != "" {
+	if block := templateBlock(home, catalog, detail, origin); block != "" {
 		out = append(out, "\n== 模板与简写（先看这里）==\n"+block)
 	}
 	if block := homeBlock(home); block != "" {
@@ -52,6 +53,37 @@ func pick(samples []ai.Sample, label string) string {
 		}
 	}
 	return ""
+}
+
+// sampleOrigin 从样本 label（形如 "首页 https://xxx.com"）里取站点根地址。
+// 简写规则省掉 主页url 时，分类url 必须是含域名的绝对地址——指纹用它给出标准写法。
+func sampleOrigin(samples []ai.Sample) string {
+	for _, sample := range samples {
+		if !strings.HasPrefix(sample.Label, "首页") {
+			continue
+		}
+		for _, field := range strings.Fields(sample.Label) {
+			if origin := xbpqSampleOrigin(field); origin != "" {
+				return origin
+			}
+		}
+	}
+	return ""
+}
+
+func xbpqSampleOrigin(address string) string {
+	index := strings.Index(address, "://")
+	if index < 0 {
+		return ""
+	}
+	rest := address[index+3:]
+	if slash := strings.IndexAny(rest, "/?#"); slash >= 0 {
+		rest = rest[:slash]
+	}
+	if rest == "" {
+		return ""
+	}
+	return address[:index+3] + rest
 }
 
 // ---- 模板与简写 ----
@@ -149,7 +181,7 @@ var (
 )
 
 // templateBlock 生成「模板与简写」指纹块：识别皮肤、命中家族、可省略字段清单。
-func templateBlock(home, catalog, detail string) string {
+func templateBlock(home, catalog, detail, origin string) string {
 	skin, skinCount := detectSkin(catalog, detail, home)
 	tpl, example := guessCategoryTemplate(home, catalog)
 	var lines []string
@@ -159,6 +191,13 @@ func templateBlock(home, catalog, detail string) string {
 		}
 		return fmt.Sprintf("%s（样本出现 %d 次）", skin, skinCount)
 	}())
+	// 简写铁律：省掉 主页url 时，分类url 必须是含域名的绝对地址；{catePg} 分页占位必须写。
+	if tpl != "" && !strings.HasPrefix(tpl, "http") && origin != "" {
+		lines = append(lines, fmt.Sprintf("若简写省略 主页url，分类url 必须写全绝对地址：\"%s%s\"（相对路径 jar 无法定位站点，会直接识别失败）。", origin, tpl))
+	}
+	if tpl != "" && !strings.Contains(tpl, "{catePg}") {
+		lines = append(lines, "⚠ 推断形态缺少分页占位 {catePg}——【分类url 必须补上 {catePg}】，否则验证第 2 页与第 1 页相同、paging 步骤必挂；对照分类页/首页的分页链接确认页码位置：路径式 …/{cateId}/{catePg}/…、文件名式 …/{cateId}-{catePg}.html、query 式 …&pg={catePg}。")
+	}
 	if tpl == "" {
 		lines = append(lines, "分类链接形态：首页未识别到标准分类链接，无法套用内置模板——按样本全字段手写。")
 		return strings.Join(lines, "\n")
@@ -190,7 +229,7 @@ func templateBlock(home, catalog, detail string) string {
 	}
 	skippable := xbpq.TemplateFieldNames(merged)
 	lines = append(lines, "这些字段引擎会用模板兜底、【可以省略不写】："+strings.Join(skippable, "、"))
-	lines = append(lines, "简写规则仍【必须写】：分类、分类url、搜索url（若模板没给）、以及样本里与皮肤不符、模板截不到的字段。")
+	lines = append(lines, "简写规则仍【必须写】：分类、分类url（含域名的绝对地址、必含 {cateId} 与 {catePg}）、搜索url（若模板没给）、以及样本里与皮肤不符、模板截不到的字段。")
 	lines = append(lines, "策略：能对上皮肤的字段直接省略靠模板；模板指纹没覆盖、或与样本 HTML 不一致的字段，回到样本逐字实测再写，不要盲信模板默认值。")
 	return strings.Join(lines, "\n")
 }
