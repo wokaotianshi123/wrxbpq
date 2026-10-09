@@ -86,14 +86,21 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 		}
 	}
 
-	// 播放列表 是分隔符字段，允许 "<li>" 这类无 && 形态；单独校验其闭合合理性
+	// 播放列表 是"分集分隔符"，引擎按它做 strings.Split。
+	// 常见误区：写成 前缀&&后缀（那是截取串写法）——页面上找不到该字面量，Split 切不开，
+	// 整个播放容器会被当成 1 集（实测：5 条线路×4 集的站只剩 1 集）。
 	if list := rule.Field("播放列表"); strings.Contains(list, "&&") {
-		add("播放列表", "播放列表 是分隔符不是截取串，直接写 <li> 或留空（默认 #），去掉 &&")
+		add("播放列表", fmt.Sprintf("播放列表 是【分集分隔符】不是截取串，不能写成 前缀&&后缀——引擎按它做 Split，页面上找不到 %q 这个字面量，整个播放容器会被当成 1 集。改成样本里真实存在的分隔串：分集是 <li> 结构就写 </li>（用闭合标签；开标签常带属性或空格如 `<li >`，匹配不稳）；分集之间本就有 # 之类符号就写那个符号", list))
 	}
 
 	// 多线路识别（与指纹四路证据一致）：
 	detail := pick(samples, "详情页")
 	ev := routeEvidenceOf(detail)
+	// 分隔符本身必须在详情页里真的出现，否则 Split 切不开同样只剩 1 集。
+	// 典型踩坑：页面是 `<li >`（带空格）而规则写 `<li>`，看似"写对了"实则一次都匹配不到。
+	if list := rule.Field("播放列表"); list != "" && !strings.Contains(list, "&&") && detail != "" && !strings.Contains(detail, list) {
+		add("播放列表", fmt.Sprintf("播放列表 分隔符 %q 在详情页样本里一次都没出现——Split 切不开，分集只会剩 1 条。请从详情页原文里挑一个能把每条分集分开的真实串（分集是 <li> 结构时通常写 </li>）", list))
+	}
 	if route := rule.Field("线路数组"); route != "" {
 		if play := rule.Field("播放数组"); play != "" && sameStart(route, play) {
 			// 多线路站里 线路数组==播放数组 是正确写法；只有确认单线路时才报"拆重复线路"。

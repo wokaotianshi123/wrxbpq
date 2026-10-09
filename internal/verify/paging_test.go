@@ -182,3 +182,79 @@ func TestPagingCandidatesSameCategory(t *testing.T) {
 		t.Errorf("未锚定时候选 = %v，期望 2 个", all)
 	}
 }
+
+// TestProbePagingSynthesizesCatePg 固化"先定 {cateId}、再按本站模板追加 {catePg}"的兜底能力：
+// 55yss 这类站的分类页里根本没有「下一页」链接（/list/3.html 是另一个分类），
+// 只扫页面链接会让 {catePg} 完全探不到、分类url 只剩 {cateId}。
+// 此时必须按常见形态主动拼接第 2 页去实测，产出 {cateId}+{catePg} 的组合模板。
+func TestProbePagingSynthesizesCatePg(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/list/2.html": // 电视剧（id=2）第 1 页：只有其它分类链接，没有「下一页」
+			page := ""
+			for i := 1; i <= 10; i++ {
+				page += fmt.Sprintf(`<a href="/p1/%d.html" title="剧%d"></a>`, i, i)
+			}
+			w.Write([]byte(`<html><body><div>` + page + `</div>
+<a href="/list/3.html">综艺</a><a href="/list/1.html">电影</a></body></html>`))
+		case "/list/2-2.html": // 电视剧 第 2 页（连字符分页形态），条目与第 1 页不重合
+			page := ""
+			for i := 1; i <= 10; i++ {
+				page += fmt.Sprintf(`<a href="/p2/%d.html" title="剧下%d"></a>`, i, i)
+			}
+			w.Write([]byte(`<html><body><div>` + page + `</div></body></html>`))
+		default: // 其余拼接形态不存在
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`<html><body>not found</body></html>`))
+		}
+	}))
+	defer server.Close()
+
+	fetcher := xbpq.NewFetcher("")
+	base := server.URL + "/list/2.html"
+	body := mustGet(t, fetcher, base)
+	idPos := idPosition{pathIndex: 2, prefix: 0, tokenLen: 1, exampleID: "2", examplePath: base}
+
+	finding := probePaging(context.Background(), fetcher, base, body, idPos)
+	if !finding.Confirmed {
+		t.Fatalf("分类页无「下一页」链接时应主动拼接实测 {catePg}，实际未确认：\n%s", finding.Note)
+	}
+	if !strings.Contains(finding.Template, "{cateId}") || !strings.Contains(finding.Template, "{catePg}") {
+		t.Errorf("产出的分类url 模板必须同时含 {cateId} 与 {catePg}，实际：%s", finding.Template)
+	}
+	if !strings.HasSuffix(finding.Template, "/list/{cateId}-{catePg}.html") {
+		t.Errorf("组合模板应为 /list/{cateId}-{catePg}.html，实际：%s", finding.Template)
+	}
+	t.Logf("合成实测 Note:\n%s", finding.Note)
+}
+
+// TestProbePagingSynthFailReportsTried 固化：所有拼接形态都无效时不能静默"跳过"，
+// 结论里必须列出试过哪些候选，便于判断站点是否真的没有分页。
+func TestProbePagingSynthFailReportsTried(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := ""
+		for i := 1; i <= 10; i++ {
+			page += fmt.Sprintf(`<a href="/p1/%d.html" title="剧%d"></a>`, i, i)
+		}
+		if r.URL.Path == "/list/2.html" {
+			w.Write([]byte(`<html><body><div>` + page + `</div><a href="/list/3.html">综艺</a></body></html>`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`<html><body>not found</body></html>`))
+	}))
+	defer server.Close()
+
+	fetcher := xbpq.NewFetcher("")
+	base := server.URL + "/list/2.html"
+	body := mustGet(t, fetcher, base)
+	idPos := idPosition{pathIndex: 2, prefix: 0, tokenLen: 1, exampleID: "2", examplePath: base}
+
+	finding := probePaging(context.Background(), fetcher, base, body, idPos)
+	if finding.Confirmed {
+		t.Fatalf("所有拼接形态都无效时不应确认分页，实际模板：%s", finding.Template)
+	}
+	if !strings.Contains(finding.Note, "已试候选拼接页") {
+		t.Errorf("失败结论应列出试过的拼接候选，实际：\n%s", finding.Note)
+	}
+}

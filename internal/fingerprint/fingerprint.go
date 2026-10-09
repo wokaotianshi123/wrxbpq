@@ -263,6 +263,12 @@ func templateBlock(home, catalog, detail, origin, paging, category string) strin
 			suffix = "——页码形态经真实拼接+抓取+两页比对确认，{cateId} 位置来自分类实测，逐字照抄，不要再按静态推断改形态。"
 		}
 		lines = append(lines, fmt.Sprintf("分类url 分页形态【已实测】：%q%s", collapseSpace(tpl), suffix))
+		// 「分类检测」样本里也带着一条只含 {cateId} 的模板（用于说明 {cateId} 落在哪个位置）。
+		// 当分页已实测出「{cateId}+{catePg}」组合模板时，必须明确裁决最终以组合模板为准，
+		// 否则 AI 会照抄分类检测里那条缺 {catePg} 的模板当分类url。
+		if strings.Contains(tpl, "{cateId}") && strings.Contains(tpl, "{catePg}") && strings.Contains(category, "实测分类URL模板") {
+			lines = append(lines, "⚠ 分类url 最终形态【以「分页实测」的组合模板为准】（{cateId} 与 {catePg} 并存，两个占位位置都经真实抓取+内容比对确认）；「分类检测」里那条模板只是 {cateId} 的位置示意，【不是】最终分类url——不要照抄它当分类url，也不要把两个占位拆开重写。")
+		}
 	} else if categoryTplUsed {
 		lines = append(lines, fmt.Sprintf("分类url 形态：%q——{cateId} 位置来自分类实测（导航分类真实抓取验证，逐字保留、不要挪动）；页码段 %s（未实测，形态以 paging 验证为准，若验证失败按样本下一页链接换形态重试）。",
 			collapseSpace(tpl), func() string {

@@ -171,6 +171,27 @@ func TestEpisodesMultiRoute(t *testing.T) {
 	}
 }
 
+// TestEpisodesListSplitIsSeparator 固化「播放列表 = 分集分隔符」而不是截取串：
+// 写成 前缀&&后缀（如 <li&&</li>）时页面上找不到该字面量，Split 切不开 → 整个容器只剩 1 集；
+// 正确写法是闭合标签 </li>（开标签常带属性/空格如 `<li >`，匹配不稳）。
+func TestEpisodesListSplitIsSeparator(t *testing.T) {
+	body := `<ul class="playlist"><li ><a href="/play/1-1-1.html">01</a></li>` +
+		`<li ><a href="/play/1-1-2.html">02</a></li><li ><a href="/play/1-1-3.html">03</a></li></ul>`
+	base := `{"主页url":"https://a.com","播放数组":"<ul class=\"playlist\">&&</ul>","播放标题":">&&</a>","播放链接":"href=\"&&\"",`
+	wrong, _ := ParseRule(base + `"播放列表":"<li&&</li>"}`)
+	if best, _ := (&Engine{Rule: wrong, Base: "https://a.com"}).episodes(body, "https://a.com/vod/1.html"); len(best) != 1 {
+		t.Errorf("播放列表 写成 <li&&</li> 时切不开，应只剩 1 集，实际 %d", len(best))
+	}
+	right, _ := ParseRule(base + `"播放列表":"</li>"}`)
+	best, _ := (&Engine{Rule: right, Base: "https://a.com"}).episodes(body, "https://a.com/vod/1.html")
+	if len(best) != 3 {
+		t.Fatalf("播放列表 写闭合标签 </li> 应切出 3 集，实际 %d", len(best))
+	}
+	if best[2].title != "03" {
+		t.Errorf("第3集标题 = %q，期望 03", best[2].title)
+	}
+}
+
 func TestEpisodesTitleDollarLink(t *testing.T) {
 	rule, _ := ParseRule(`{"主页url":"https://a.com","播放数组":"mac_url='&&'","播放列表":"#"}`)
 	body := `mac_url='第01集$https://cdn/1.m3u8#第02集$https://cdn/2.m3u8'`

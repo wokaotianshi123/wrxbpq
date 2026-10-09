@@ -40,66 +40,86 @@ func probePaging(ctx context.Context, fetcher *xbpq.Fetcher, catalogURL, catalog
 	if strings.TrimSpace(catalogURL) == "" || strings.TrimSpace(catalogBody) == "" {
 		return PagingFinding{Note: "分页实测 结论：跳过（缺少分类页样本）。"}
 	}
-	candidates := pagingCandidates(catalogURL, catalogBody, idPos)
-	if len(candidates) == 0 {
-		return PagingFinding{Note: "分页实测 结论：跳过（分类页里未找到「下一页/页码」链接，可能是 AJAX 翻页或该分类只有一页）。{catePg} 未经实测——先按样本最像页码的段写，最终以验证 paging 步骤实测为准。"}
-	}
+	linkCandidates := pagingCandidates(catalogURL, catalogBody, idPos)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	// 合成阶段要挨个试多种分页形态，超时比只试页面链接时放宽一些。
+	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
 	first := entrySet(catalogBody)
 	if len(first) < 3 {
 		return PagingFinding{Note: fmt.Sprintf("分页实测 结论：跳过（分类页只提出 %d 个条目链接，样本不足）。", len(first))}
 	}
-	var failures []string
-	for _, candidate := range candidates {
-		var template, firstPage, secondPage string
+	anchored := idPosValid(idPos)
+
+	// attempt 试一个候选页：先产出模板，再真抓取并与第 1 页比对内容重合。
+	// 成功返回 finding，否则返回失败原因（进结论文本，供 AI/用户看到试过哪些）。
+	attempt := func(candidate string, synthesized bool) (PagingFinding, string) {
+		var template string
 		var ok bool
-		if idPosValid(idPos) {
+		if anchored {
 			// 已锚定分类：在同一 {cateId} 内探页码，直接产出含 {cateId}+{catePg} 的组合模板。
 			template, ok = buildCombinedTemplate(catalogURL, candidate, idPos)
-		} else {
-			template, firstPage, secondPage, ok = buildPagingTemplate(catalogURL, candidate)
-		}
-		if !ok {
-			if idPosValid(idPos) {
-				failures = append(failures, fmt.Sprintf("%s（与第1页差异不能解析为页码——可能该链接是其它分类而非下一页）", candidate))
-			} else {
-				failures = append(failures, fmt.Sprintf("%s（与第1页的差异段 %s→%s 不是 +1 数字，不像页码）", candidate, digitOrDash(firstPage), digitOrDash(secondPage)))
+			if !ok {
+				return PagingFinding{}, "该链接与第1页的差异不能解析为页码（多半是其它分类而非下一页）"
 			}
-			continue
+		} else {
+			var firstPage, secondPage string
+			template, firstPage, secondPage, ok = buildPagingTemplate(catalogURL, candidate)
+			if !ok {
+				return PagingFinding{}, fmt.Sprintf("与第1页的差异段 %s→%s 不是 +1 数字，不像页码", digitOrDash(firstPage), digitOrDash(secondPage))
+			}
 		}
 		body, err := fetcher.Get(ctx, candidate, catalogURL)
 		if err != nil || len(body) < 300 {
-			failures = append(failures, candidate+"（拼接抓取失败"+errText(err)+"）")
-			continue
+			return PagingFinding{}, "拼接抓取失败" + errText(err)
 		}
 		second := entrySet(body)
 		if len(second) == 0 {
-			failures = append(failures, candidate+"（抓回页里提不出条目链接）")
-			continue
+			return PagingFinding{}, "抓回页里提不出条目链接"
 		}
 		score := overlap(first, second)
 		if score >= 85 {
 			// 拼得出去但内容同页：差异段多半是年份/地区之类筛选值，不是页码。
-			failures = append(failures, fmt.Sprintf("%s（内容与第1页重合 %d%%，差异段不是页码而是筛选值）", candidate, score))
-			continue
+			return PagingFinding{}, fmt.Sprintf("内容与第1页重合 %d%%，该差异不是页码而是筛选值", score)
 		}
 		note := fmt.Sprintf("分页实测 结论：通过\n实测分类url模板：\"%s\"\n第2页实测地址：%s\n与第1页条目重合仅 %d%%（第1页 %d 条 / 第2页 %d 条），确认翻页生效。",
 			template, candidate, score, len(first), len(second))
-		if idPosValid(idPos) {
+		switch {
+		case synthesized:
+			note += "该 {catePg} 形态由服务端在已实测的 {cateId} 模板上主动拼接第2页、抓回比对内容后确认（分类页里没有「下一页」链接，属纯拼接翻页站）。{cateId} 与 {catePg} 两个占位位置都经真实抓取确认，分类url 整体照抄这个组合模板，不要再拆开改形态。"
+		case anchored:
 			note += "该模板已同时含 {cateId}（位置来自「分类检测」实测）与 {catePg}，二者均为实测结论，直接整体照抄，不要再按静态推断拆改形态。"
-		} else {
+		default:
 			note += "写 分类url 时页码段逐字用 {catePg} 替换上面模板里的页码数字（其余段与筛选占位按需保留）——这是【实测结论】，优先级高于任何静态推断。"
 		}
-		return PagingFinding{
-			Confirmed: true,
-			Template:  template,
-			SecondURL: candidate,
-			Note:      note,
+		return PagingFinding{Confirmed: true, Template: template, SecondURL: candidate, Note: note}, ""
+	}
+
+	var failures []string
+	// ①先试分类页里真实存在的「下一页/页码」链接。
+	for _, candidate := range linkCandidates {
+		if finding, fail := attempt(candidate, false); fail == "" {
+			return finding
+		} else {
+			failures = append(failures, candidate+"（"+fail+"）")
 		}
+	}
+	// ②已锚定 {cateId} 却没找到可用的「下一页」链接（AJAX 翻页 / 纯拼接站）：
+	//   按常见分页形态在 {cateId} 模板上主动拼接第 2 页去实测，而不是直接放弃 {catePg}。
+	//   这样分类url 才能做到"先定 {cateId}，再按本站模板追加 {catePg}"。
+	if anchored {
+		for _, candidate := range synthPagingCandidates(catalogURL, idPos) {
+			if finding, fail := attempt(candidate, true); fail == "" {
+				return finding
+			} else {
+				failures = append(failures, candidate+"（"+fail+"）")
+			}
+		}
+	}
+	if len(failures) == 0 {
+		return PagingFinding{Note: "分页实测 结论：跳过（分类页里未找到「下一页/页码」链接，可能是 AJAX 翻页或该分类只有一页）。{catePg} 未经实测——先按样本最像页码的段写，最终以验证 paging 步骤实测为准。"}
 	}
 	return PagingFinding{Note: "分页实测 结论：未通过\n已试候选拼接页：" + strings.Join(capList(failures), "\n") +
 		"\n{catePg} 形态未能实测确定——按 paging 验证结果逐一试下一种形态（/2/、-2.html、?pg=2 等）。"}
@@ -181,6 +201,65 @@ func pagingCandidates(catalogURL, catalogBody string, idPos idPosition) []string
 		if len(out) >= 4 {
 			break
 		}
+	}
+	return out
+}
+
+// synthPagingCandidates 在已实测确定 {cateId} 位置的分类 URL 上，按常见分页形态
+// 主动拼接"第 2 页"候选 URL。用于分类页里找不到「下一页」链接（AJAX 翻页 / 纯拼接站）
+// 时仍然把 {catePg} 实测出来，而不是直接放弃分页、只留 {cateId}。
+//
+// 关键约束：所有候选都保持 {cateId} 段原值不变，只在其之外插入页码 2——
+// 于是 buildCombinedTemplate 能把两个 URL 的 {cateId} 同时还原成占位符、
+// 只把新插入的页码段抽成 {catePg}，产出 {cateId}+{catePg} 的组合模板
+// （例如 /list/2.html + /list/2-2.html → /list/{cateId}-{catePg}.html）。
+//
+// 形态是否真的翻页，由 probePaging 的"抓取 + 内容重合"判定把关，猜错会被拒。
+func synthPagingCandidates(catalogURL string, idPos idPosition) []string {
+	tpl := idPos.substitute(catalogURL, "{cateId}")
+	realID := idPos.extractID(catalogURL)
+	if tpl == "" || realID == "" {
+		return nil
+	}
+	parsed, err := url.Parse(tpl)
+	if err != nil || parsed.Host == "" {
+		return nil
+	}
+	path := parsed.Path
+	lastSlash := strings.LastIndex(path, "/")
+	if lastSlash < 0 {
+		return nil
+	}
+	dir, file := path[:lastSlash+1], path[lastSlash+1:]
+	var forms []string
+	if dot := strings.LastIndex(file, "."); dot > 0 {
+		stem, ext := file[:dot], file[dot:]
+		// /list/{cateId}.html → -2 追加、_2 追加、以及 2 作目录层（/list/{cateId}/2.html）
+		forms = append(forms, dir+stem+"-{catePg}"+ext, dir+stem+"_{catePg}"+ext, dir+stem+"/{catePg}"+ext)
+	} else {
+		forms = append(forms, dir+file+"-{catePg}", dir+file+"_{catePg}", dir+file+"/{catePg}")
+	}
+	// 查询参数形态：?page=2 / ?pg=2 / ?p=2（已有 query 时用 & 追加，原筛选参数保留）
+	for _, key := range []string{"page", "pg", "p"} {
+		if parsed.RawQuery == "" {
+			forms = append(forms, path+"?"+key+"={catePg}")
+		} else {
+			forms = append(forms, path+"?"+parsed.RawQuery+"&"+key+"={catePg}")
+		}
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, form := range forms {
+		candidate := strings.Replace(form, "{cateId}", realID, 1)
+		candidate = strings.Replace(candidate, "{catePg}", "2", 1)
+		if !strings.HasPrefix(candidate, "http") {
+			candidate = parsed.Scheme + "://" + parsed.Host + candidate
+		}
+		if seen[candidate] || candidate == catalogURL {
+			continue
+		}
+		seen[candidate] = true
+		out = append(out, candidate)
 	}
 	return out
 }
