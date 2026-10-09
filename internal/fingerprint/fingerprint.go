@@ -24,14 +24,16 @@ func Analyze(samples []ai.Sample) string {
 	detail := pick(samples, "详情页")
 	play := pick(samples, "播放页")
 	origin := sampleOrigin(samples)
+	paging := pick(samples, "分页实测")
+	category := pick(samples, "分类检测")
 
 	var out []string
 	out = append(out, "【站点指纹】以下锚点由服务端从真实页面样本里解析，并统计过出现次数。")
 	out = append(out, "规则里的 pattern 一律照抄指纹中的锚点原文（逐字符，含空格与引号），禁止凭印象改写；指纹没覆盖的字段再回到样本原文里逐字复制。")
-	if block := templateBlock(home, catalog, detail, origin); block != "" {
+	if block := templateBlock(home, catalog, detail, origin, paging, category); block != "" {
 		out = append(out, "\n== 模板与简写（先看这里）==\n"+block)
 	}
-	if block := homeBlock(home); block != "" {
+	if block := homeBlock(home, category); block != "" {
 		out = append(out, "\n== 首页（分类与搜索）==\n"+block)
 	}
 	if block := catalogBlock(catalog); block != "" {
@@ -181,9 +183,45 @@ var (
 )
 
 // templateBlock 生成「模板与简写」指纹块：识别皮肤、命中家族、可省略字段清单。
-func templateBlock(home, catalog, detail, origin string) string {
+// paging 是 Probe 阶段「分页实测」样本的结论文本；category 是「分类检测」样本的结论文本；
+// 实测通过时用它覆盖静态推断。
+func templateBlock(home, catalog, detail, origin, paging, category string) string {
+	catView := parseCategoryFinding(category)
 	skin, skinCount := detectSkin(catalog, detail, home)
 	tpl, example := guessCategoryTemplate(home, catalog)
+	// 分页实测优先：Probe 真的拼了第 2 页抓回来比对过，结论比正则推断可靠。
+	// 实测模板里页码已是 {catePg}，但分类 ID 还是真实数字——还原成 {cateId}，
+	// 让 AI 拿去只改 {cateId} 就能匹配 分类 里的每个 ID。
+	pagingTemplate, pagingConfirmed := parsePagingFinding(paging)
+	categoryTplUsed := false
+	if pagingConfirmed && pagingTemplate != "" {
+		guessed := tpl
+		if catView.Template != "" && (catView.Status == "通过" || catView.Status == "部分通过") {
+			// 分类实测已确定 {cateId} 的真实位置——用它做对齐骨架，比静态推断可靠
+			guessed = catView.Template
+			categoryTplUsed = true
+		}
+		if guessed != "" && !strings.HasPrefix(guessed, "http") && origin != "" {
+			guessed = origin + guessed
+		}
+		tpl = normalizePagingTemplate(guessed, pagingTemplate)
+		example = "分页实测（拼第2页抓取+内容比对通过）还原的模板"
+	} else if catView.Template != "" && (catView.Status == "通过" || catView.Status == "部分通过") {
+		// 分页没实测、但分类 id 位置实测过：以实测 {cateId} 骨架打底，
+		// 分页段用推断形态补齐（最终以 paging 验证为准）。
+		g := tpl
+		if g != "" && !strings.HasPrefix(g, "http") && origin != "" {
+			g = origin + g
+		}
+		if merged := mergeCategoryPagingTemplates(catView.Template, g); merged != "" {
+			tpl = merged
+			example = "分类实测 {cateId} 骨架 + 推断分页段（{catePg} 未实测）"
+		} else {
+			tpl = catView.Template
+			example = "分类实测（导航分类真实抓取验证）的 {cateId} 模板"
+		}
+		categoryTplUsed = true
+	}
 	var lines []string
 	lines = append(lines, "页面皮肤探测："+func() string {
 		if skin == "" {
@@ -191,18 +229,41 @@ func templateBlock(home, catalog, detail, origin string) string {
 		}
 		return fmt.Sprintf("%s（样本出现 %d 次）", skin, skinCount)
 	}())
+	if paging != "" {
+		lines = append(lines, paging)
+	}
+	if category != "" {
+		lines = append(lines, category)
+	}
 	// 简写铁律：省掉 主页url 时，分类url 必须是含域名的绝对地址；{catePg} 分页占位必须写。
 	if tpl != "" && !strings.HasPrefix(tpl, "http") && origin != "" {
 		lines = append(lines, fmt.Sprintf("若简写省略 主页url，分类url 必须写全绝对地址：\"%s%s\"（相对路径 jar 无法定位站点，会直接识别失败）。", origin, tpl))
 	}
-	if tpl != "" && !strings.Contains(tpl, "{catePg}") {
-		lines = append(lines, "⚠ 推断形态缺少分页占位 {catePg}——【分类url 必须补上 {catePg}】，否则验证第 2 页与第 1 页相同、paging 步骤必挂；对照分类页/首页的分页链接确认页码位置：路径式 …/{cateId}/{catePg}/…、文件名式 …/{cateId}-{catePg}.html、query 式 …&pg={catePg}。")
+	// 缺 {catePg} 的警示：静态推断出来才需要提醒补；实测通过说明形态已被验证过。
+	if tpl != "" && !strings.Contains(tpl, "{catePg}") && !pagingConfirmed {
+		lines = append(lines, "⚠ 推断形态缺少分页占位 {catePg}——【分类url 必须补上 {catePg}】，否则验证第 2 页与第 1 页相同、paging 步骤必挂。{catePg} 的具体形态（/2/、-2.html、?pg=2…）要靠真实拼接测试决定，不能只凭长相推断：请对照样本里的下一页链接，并用 paging 验证确认翻页内容确实变化。")
 	}
 	if tpl == "" {
 		lines = append(lines, "分类链接形态：首页未识别到标准分类链接，无法套用内置模板——按样本全字段手写。")
 		return strings.Join(lines, "\n")
 	}
-	lines = append(lines, fmt.Sprintf("分类url 推断形态：%q（源自真实链接 %s）", collapseSpace(tpl), example))
+	if pagingConfirmed && pagingTemplate != "" {
+		suffix := "——这是真实拼接+抓取+两页比对确认过的模板（分类ID 段已还原为 {cateId}），逐字照抄，不要再按静态推断改形态。"
+		if categoryTplUsed {
+			suffix = "——页码形态经真实拼接+抓取+两页比对确认，{cateId} 位置来自分类实测，逐字照抄，不要再按静态推断改形态。"
+		}
+		lines = append(lines, fmt.Sprintf("分类url 分页形态【已实测】：%q%s", collapseSpace(tpl), suffix))
+	} else if categoryTplUsed {
+		lines = append(lines, fmt.Sprintf("分类url 形态：%q——{cateId} 位置来自分类实测（导航分类真实抓取验证，逐字保留、不要挪动）；页码段 %s（未实测，形态以 paging 验证为准，若验证失败按样本下一页链接换形态重试）。",
+			collapseSpace(tpl), func() string {
+				if strings.Contains(tpl, "{catePg}") {
+					return "是按推断补齐的"
+				}
+				return "缺少 {catePg}、必须补上"
+			}()))
+	} else {
+		lines = append(lines, fmt.Sprintf("分类url 推断形态（未实测，仅供参考）：%q（源自真实链接 %s）", collapseSpace(tpl), example))
+	}
 	familyName, merged := xbpq.MatchTemplate(tpl)
 	if merged == nil {
 		lines = append(lines, "该形态未命中内置模板家族——按样本全字段手写。")
@@ -234,7 +295,164 @@ func templateBlock(home, catalog, detail, origin string) string {
 	return strings.Join(lines, "\n")
 }
 
+// mergeCategoryPagingTemplates 把"实测出的 {cateId} 骨架"（来自分类检测，页码段未知）
+// 与"推断的完整形态"（来自静态样本，含 {catePg} 段）拼起来：以实测骨架的
+// {cateId} 为头，接上推断形态 {cateId} 之后的整段尾巴（含筛选/页码占位）。
+// 拼接前提：推断尾巴必须真的带 {catePg}，否则不拼（回退纯骨架并提示补页码）。
+// 重叠合并：骨架 {cateId} 之后可能已有 ".html" 之类后缀，而推断尾巴结尾同样是它
+// （如 /list/{cateId}.html + -{catePg}.html），直接拼会出现 .html.html——
+// 取"推断尾巴后缀 = 骨架后缀前缀"的最大重叠去重。
+func mergeCategoryPagingTemplates(categoryTpl, guessed string) string {
+	if categoryTpl == "" || guessed == "" {
+		return ""
+	}
+	if !strings.Contains(categoryTpl, "{cateId}") || strings.Contains(categoryTpl, "{catePg}") {
+		return ""
+	}
+	idAt := strings.Index(guessed, "{cateId}")
+	if idAt < 0 {
+		return ""
+	}
+	catAt := strings.Index(categoryTpl, "{cateId}")
+	// 头必须逐字对齐（协议+域名+{cateId} 之前的路径），否则两种形态互相矛盾，
+	// 不硬拼——回退纯骨架并提示补页码。
+	if categoryTpl[:catAt] != guessed[:idAt] {
+		return ""
+	}
+	tail := guessed[idAt+len("{cateId}"):]
+	if !strings.Contains(tail, "{catePg}") {
+		return ""
+	}
+	skeletonTail := categoryTpl[strings.Index(categoryTpl, "{cateId}")+len("{cateId}"):]
+	overlap := 0
+	maxK := len(tail)
+	if len(skeletonTail) < maxK {
+		maxK = len(skeletonTail)
+	}
+	for k := maxK; k > 0; k-- {
+		if tail[len(tail)-k:] == skeletonTail[:k] {
+			overlap = k
+			break
+		}
+	}
+	return strings.Replace(categoryTpl, "{cateId}", "{cateId}"+tail+skeletonTail[overlap:], 1)
+}
+
 func occurrences(body, token string) int { return strings.Count(body, token) }
+
+// pagingTemplatePattern 从「分页实测」结论文本里提取实测通过的 分类url 模板。
+var pagingTemplatePattern = regexp.MustCompile(`实测分类url模板：\s*"([^"]+)"`)
+
+// parsePagingFinding 解析分页实测样本：返回（实测模板, 是否确认通过）。
+func parsePagingFinding(paging string) (template string, confirmed bool) {
+	if paging == "" {
+		return "", false
+	}
+	confirmed = strings.Contains(paging, "结论：通过")
+	if match := pagingTemplatePattern.FindStringSubmatch(paging); len(match) > 1 {
+		template = match[1]
+	}
+	return template, confirmed
+}
+
+// normalizePagingTemplate 把实测通过的模板（页码段已是 {catePg}，分类 ID 仍是真实数字）
+// 还原成可复用形态：以推断形态（含 {cateId}）作对齐参考，把实测串在 {cateId} 位置的
+// 数字段替换回 {cateId}。对齐失败时退回"紧邻 {catePg} 的纯数字路径段即 cateId"的
+// 规则；仍拿不准就原样返回——宁可不还原，也不产生错误模板。
+func normalizePagingTemplate(guessed, measured string) string {
+	if measured == "" {
+		return measured
+	}
+	if guessed != "" && strings.Contains(guessed, "{cateId}") {
+		parts := strings.SplitN(guessed, "{cateId}", 2)
+		head, tail := parts[0], parts[1]
+		if strings.HasPrefix(measured, head) && strings.HasSuffix(measured, tail) &&
+			len(measured) >= len(head)+len(tail) {
+			middle := measured[len(head) : len(measured)-len(tail)]
+			if middle != "" && len(middle) <= 30 && looksLikeID(middle) {
+				return head + "{cateId}" + tail
+			}
+		}
+	}
+	// 备选：{catePg} 前面紧邻的纯数字路径段大概率就是 {cateId}。
+	return pagingBeforePgPattern.ReplaceAllString(measured, "/{cateId}$2")
+}
+
+var idSegmentPattern = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z_-]{0,29}$`)
+
+func looksLikeID(s string) bool { return idSegmentPattern.MatchString(s) }
+
+// ---- 分类实测样本解析 ----
+
+var (
+	categoryConfirmedPattern = regexp.MustCompile(`已实测分类串：\s*"([^"]+)"`)
+	categoryFailedPattern    = regexp.MustCompile(`实测失败分类：(.+)（抓取失败或页面无内容`)
+	categoryURLTplPattern    = regexp.MustCompile(`实测分类URL模板：\s*"([^"]+)"`)
+)
+
+// categoryFindingView 是「分类检测」样本的解析结果。
+type categoryFindingView struct {
+	Status      string // 通过 / 部分通过 / 未通过 / 跳过 / 无样本
+	Confirmed   string // 已实测分类串（"电影$1#电视剧$2"），可能为空
+	Failed      string // 实测失败分类列表原文
+	Template    string // 实测分类URL模板（含 {cateId}）
+	IDPosition  string // {cateId} 位置描述行原文
+	SuspectSame bool   // 不同 ID 抓回页面几乎一样
+}
+
+// parseCategoryFinding 解析「分类检测」样本；无样本时返回 Status=""。
+func parseCategoryFinding(category string) categoryFindingView {
+	if strings.TrimSpace(category) == "" {
+		return categoryFindingView{}
+	}
+	view := categoryFindingView{}
+	switch {
+	case strings.Contains(category, "结论：通过"):
+		view.Status = "通过"
+	case strings.Contains(category, "结论：部分通过"):
+		view.Status = "部分通过"
+	case strings.Contains(category, "结论：未通过"):
+		view.Status = "未通过"
+	case strings.Contains(category, "结论：跳过"):
+		view.Status = "跳过"
+	}
+	if match := categoryConfirmedPattern.FindStringSubmatch(category); len(match) > 1 {
+		view.Confirmed = match[1]
+	}
+	if match := categoryFailedPattern.FindStringSubmatch(category); len(match) > 1 {
+		view.Failed = strings.TrimSpace(match[1])
+	}
+	if match := categoryURLTplPattern.FindStringSubmatch(category); len(match) > 1 {
+		view.Template = match[1]
+	}
+	if idx := strings.Index(category, "分类url 的 {cateId} 位置（实测）："); idx >= 0 {
+		line := category[idx:]
+		if end := strings.IndexByte(line, '\n'); end >= 0 {
+			line = line[:end]
+		}
+		view.IDPosition = line
+	}
+	view.SuspectSame = strings.Contains(category, "不同分类 ID 抓回的页面内容几乎一样")
+	return view
+}
+
+// confirmedCategoryIDs 从已实测分类串里提取 ID 集合（电影$1#电视剧$2 → {1,2}）。
+func confirmedCategoryIDs(confirmed string) map[string]bool {
+	out := map[string]bool{}
+	for _, pair := range strings.Split(confirmed, "#") {
+		if dollar := strings.LastIndex(pair, "$"); dollar >= 0 {
+			if id := pair[dollar+1:]; id != "" {
+				out[id] = true
+			}
+		}
+	}
+	return out
+}
+
+// pagingBeforePgPattern 实测模板里紧邻 {catePg} 前的数字路径段（可能是分类 ID）：
+// 覆盖 /1-{catePg}、/1/{catePg}、/1_{catePg} 三种衔接形态。RE2 无向前断言，
+// 用捕获组把 {catePg} 及其前置分隔符一起圈进来再回填。
+var pagingBeforePgPattern = regexp.MustCompile(`/(\d{1,6})([-_]?/?\{catePg\})`)
 
 func clipToken(s string, limit int) string {
 	s = collapseSpace(s)
@@ -253,7 +471,9 @@ func collapseSpace(s string) string {
 
 var divOpenPattern = regexp.MustCompile(`<div[^>]{0,160}>`)
 var listOpenPattern = regexp.MustCompile(`<(?:ul|ol)[^>]{0,160}>`)
-var routeTitlePattern = regexp.MustCompile(`播放线路\s*\d+`)
+
+// routeTitlePattern 线路标题文字：播放线路1 / 播放源2 / 播放来源3 / 线路4 等变体。
+var routeTitlePattern = regexp.MustCompile(`(?:播放线路|播放来源|播放源|线路)\s*\d+`)
 
 func catalogBlock(body string) string {
 	if body == "" {
@@ -556,22 +776,111 @@ func findAllRanges(body, token string) [][2]int {
 
 // ---- 详情页 ----
 
-var playHrefPattern = regexp.MustCompile(`href="[^"]*?/play/[^"]+"`)
+// playHrefPattern 分集链接识别：路径含 /play/、/vodplay/、/playhtml/、/dplay/，
+// 或播放脚本 play.php（vodplay.php 内含 play.php?，一并命中）。
+// 早期只认 /play/ 会漏掉 MacCMS 的 /vodplay/1-1-1.html 连写形态，导致这类站
+// 整个详情页分集识别为空、多线路无从判起。
+var playHrefPattern = regexp.MustCompile(`href="[^"]*?(?:/play/|/vodplay/|/playhtml/|/dplay/|play\.php\?)[^"]*"`)
 
-func detailBlock(body string) string {
+// hlTabPattern hl(海蓝)皮肤线路按钮：class 含 hl-tabs-btn，一排按钮对应多个分集面板。
+var hlTabPattern = regexp.MustCompile(`(?i)<a[^>]*class="[^"]*hl-tabs-btn[^"]*"[^>]*>`)
+
+var hlTabInnerPattern = regexp.MustCompile(`(?is)<a[^>]*hl-tabs-btn[^>]*>(.*?)</a>`)
+var tagStripPattern = regexp.MustCompile(`<[^>]+>`)
+
+// dropdownPattern myui 新版下拉多资源：data-dropdown-value 每个值就是一条线路名。
+var dropdownPattern = regexp.MustCompile(`data-dropdown-value="([^"]{1,40})"`)
+
+// stripTagsLine 去掉 HTML 标签取按钮文字（线路名）。
+func stripTagsLine(s string) string {
+	s = tagStripPattern.ReplaceAllString(s, "")
+	return collapseSpace(strings.TrimSpace(s))
+}
+
+// routeEvidence 详情页样本的多线路四路证据。
+type routeEvidence struct {
+	titles     int      // 「播放线路/播放源/线路 N」文字标题数
+	containers int      // 分集列表容器独立截出的段数（每段含分集链接）
+	hlTabs     int      // hl 皮肤线路按钮数
+	dropdowns  int      // myui data-dropdown-value 数
+	dropNames  []string // 下拉资源名（示例用）
+	tabNames   []string // hl 按钮文字（示例用）
+}
+
+func (r routeEvidence) max() int {
+	m := r.titles
+	for _, v := range []int{r.containers, r.hlTabs, r.dropdowns} {
+		if v > m {
+			m = v
+		}
+	}
+	return m
+}
+
+// multi 任一证据 ≥2 即认定多线路站。
+func (r routeEvidence) multi() bool { return r.max() >= 2 }
+
+// routeEvidenceOf 计算详情页样本的全部多线路证据。容器段数复用 voteEpisodeContainer。
+func routeEvidenceOf(body string) routeEvidence {
 	if body == "" {
-		return ""
+		return routeEvidence{}
 	}
-	matches := playHrefPattern.FindAllStringIndex(body, 50)
+	ev := routeEvidence{
+		titles:    len(routeTitlePattern.FindAllString(body, -1)),
+		hlTabs:    len(hlTabPattern.FindAllString(body, -1)),
+		dropdowns: len(dropdownPattern.FindAllStringSubmatch(body, -1)),
+	}
+	for _, m := range hlTabInnerPattern.FindAllStringSubmatch(body, 8) {
+		if name := stripTagsLine(m[1]); name != "" && !containsFold(ev.tabNames, name) {
+			ev.tabNames = append(ev.tabNames, name)
+		}
+	}
+	for _, m := range dropdownPattern.FindAllStringSubmatch(body, 8) {
+		if name := strings.TrimSpace(m[1]); name != "" && !containsFold(ev.dropNames, name) {
+			ev.dropNames = append(ev.dropNames, name)
+		}
+	}
+	if _, _, prefix, endTag, _, _ := voteEpisodeContainer(body); prefix != "" && endTag != "" {
+		for _, segment := range xbpq.List(body, prefix+"&&"+endTag) {
+			if playHrefPattern.MatchString(segment) {
+				ev.containers++
+			}
+		}
+	}
+	return ev
+}
+
+func containsFold(list []string, want string) bool {
+	for _, item := range list {
+		if strings.EqualFold(item, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// routeFormHint 按最强证据返回 线路数组 的推荐写法（一句话，供自检报错引用）。
+func routeFormHint(ev routeEvidence) string {
+	switch {
+	case ev.hlTabs >= 2:
+		return "hl 皮肤：线路数组 锚每个 hl-tabs-btn 按钮，播放数组 锚分集面板容器——两者不同锚点"
+	case ev.dropdowns >= 2:
+		return "myui dropdown：线路标题=\"data-dropdown-value=\\\"&&\\\"\"，线路数组 锚每条 dropdown-menu 的 <li>"
+	case ev.containers >= 2:
+		return "并列容器：线路数组 与 播放数组 用同一列表容器锚点，引擎按容器段切分"
+	default:
+		return "文字标题形态：线路数组 锚每条线路容器（与 播放数组 同锚点），线路标题 截「播放源/播放线路 N」标题行"
+	}
+}
+
+// voteEpisodeContainer 找分集列表容器：对每条分集链接取"其前最近的 ul/ol（优先）或 div"
+// 开始标签投票取众数。不能取标签首次出现位置——通用 class 会把页头误当容器。
+// 返回（分集链接位置表、容器开始标签、建议前缀锚、闭合标签、票数、是否 ul/ol）。
+func voteEpisodeContainer(body string) (matches [][]int, container, prefix, endTag string, votes int, fromUL bool) {
+	matches = playHrefPattern.FindAllStringIndex(body, 50)
 	if len(matches) == 0 {
-		return ""
+		return nil, "", "", "", 0, false
 	}
-	var lines []string
-	lines = append(lines, fmt.Sprintf("分集链接形态 href=\"…/play/…\" 共 %d 处，示例：%s", len(matches), clipToken(body[matches[0][0]:matches[0][1]], 90)))
-	// 分集容器：对每条分集链接找"其前最近的 div 开始标签"，再投票取众数。
-	// 不能取标签首次出现位置——重复标签（如通用 class）会把页头 div 误当容器。
-	// 分集容器：优先"每条分集链接之前最近的 ul/ol"——分集列表的内层容器，
-	// 用 ul&&</ul> 截取结束符干净；退而求其次才用 div 投票（ffv1 类无 ul 结构的站）。
 	ulVotes := map[string]int{}
 	var ulOrder []string
 	ulPositions := listOpenPattern.FindAllStringIndex(body, -1)
@@ -609,20 +918,24 @@ func detailBlock(body string) string {
 		}
 	}
 	// 平票取文档序最靠前者（map 迭代顺序随机，多线路页必须确定性输出）
-	container, best, fromUL := "", 0, false
+	best := 0
 	for _, tag := range ulOrder {
 		if ulVotes[tag] > best {
 			container, best, fromUL = tag, ulVotes[tag], true
 		}
 	}
 	if container == "" {
+		best = 0
 		for _, tag := range divOrder {
 			if divVotes[tag] > best {
 				container, best = tag, divVotes[tag]
 			}
 		}
 	}
-	endTag := "</div>"
+	if container == "" {
+		return matches, "", "", "", 0, false
+	}
+	endTag = "</div>"
 	if fromUL {
 		if strings.HasPrefix(container, "<ol") {
 			endTag = "</ol>"
@@ -630,9 +943,23 @@ func detailBlock(body string) string {
 			endTag = "</ul>"
 		}
 	}
+	prefix = suggestPrefix(container)
+	return matches, container, prefix, endTag, best, fromUL
+}
+
+func detailBlock(body string) string {
+	if body == "" {
+		return ""
+	}
+	matches, container, prefix, endTag, votes, fromUL := voteEpisodeContainer(body)
+	if len(matches) == 0 {
+		return ""
+	}
+	var lines []string
+	lines = append(lines, fmt.Sprintf("分集链接形态 href=\"…/play/…\" 共 %d 处，示例：%s", len(matches), clipToken(body[matches[0][0]:matches[0][1]], 90)))
+	ev := routeEvidenceOf(body)
 	if container != "" {
-		prefix := suggestPrefix(container)
-		lines = append(lines, fmt.Sprintf("分集列表容器真实开始标签：%s （%d 条分集链接投票；该前缀全文出现 %d 次）", clipToken(container, 120), best, occurrences(body, prefix)))
+		lines = append(lines, fmt.Sprintf("分集列表容器真实开始标签：%s （%d 条分集链接投票；该前缀全文出现 %d 次）", clipToken(container, 120), votes, occurrences(body, prefix)))
 		if prefix != strings.TrimSuffix(container, ">") {
 			lines = append(lines, fmt.Sprintf("  （用 %q 前缀匹配更稳：同类行的 style= 等附加属性可能逐行不同）", prefix))
 		}
@@ -641,31 +968,30 @@ func detailBlock(body string) string {
 		} else {
 			lines = append(lines, fmt.Sprintf("  → 播放数组 建议 \"%s&&</div>\"——起始锚点必须去掉尾部的 >，因为真实标签往往带 style= 等额外属性，带 > 会匹配不上。", escapeGo(prefix)))
 		}
-		// 多线路判定：两路证据——①「播放线路 N」文字标题；②把线路容器锚点
-		// 真喂给截取引擎数段数（每段含 /play/ 链接才算一条线路）。
+		// 多线路判定：四路证据——①「播放线路/播放源/线路 N」文字标题；②分集容器独立截段数
+		// （每段含分集链接才算一条线路）；③hl 皮肤线路按钮数；④myui data-dropdown-value 数。
 		// 很多站没有"播放线路"字样但线路容器并排多个，只数文字会漏判。
-		routes := routeTitlePattern.FindAllString(body, -1)
-		containerRoutes := 0
-		if container != "" {
-			probe := prefix + "&&" + endTag
-			for _, seg := range xbpq.List(body, probe) {
-				if playHrefPattern.MatchString(seg) {
-					containerRoutes++
-				}
+		if ev.multi() {
+			lines = append(lines, fmt.Sprintf("  检测到多线路站（最强证据 %d 条；文字标题 %d、分集容器独立截出 %d 段、hl 线路按钮 %d、dropdown 资源 %d），【必须写 线路数组】。",
+				ev.max(), ev.titles, ev.containers, ev.hlTabs, ev.dropdowns))
+			switch {
+			case ev.hlTabs >= 2:
+				lines = append(lines, fmt.Sprintf("  → hl(海蓝)皮肤：线路按钮与分集面板分离，线路数组 与 播放数组 【不是】同锚点——线路数组=\"class=\\\"hl-tabs-btn hl-slide-swiper\\\"&&</a>\"，线路标题=\">&&</a>\"（按钮文字是\\\"线路1\\\"这类占位时加 [替换:线路1>>资源名]，需要指定顺序再加 [排序:资源B>资源A]）；播放数组 用分集面板容器（data-value 指向的 id，如 \"id=\\\"hl-plays-list\\\"&&</div>\"）。按钮文字实测：%s。",
+					clipToken(strings.Join(ev.tabNames, "、"), 120)))
+			case ev.dropdowns >= 2:
+				lines = append(lines, fmt.Sprintf("  → myui dropdown 形态：线路标题=\"data-dropdown-value=\\\"&&\\\"\"（资源名实测：%s）；线路数组 锚每条 dropdown-menu 的 <li> 容器（对照详情页原文逐字写）。",
+					clipToken(strings.Join(ev.dropNames, "、"), 120)))
+			case ev.containers >= 2:
+				lines = append(lines, fmt.Sprintf("  → 并列容器形态：线路数组 与 播放数组 用同一个列表容器锚点（%s&&%s）即可，引擎按容器段切分线路；每条线路有容器标题行（如 <h3 class=\"title\">播放源…、data-dropdown-value）时再写 线路标题 截它。",
+					escapeGo(prefix), endTag))
+			default:
+				lines = append(lines, "  → 文字标题形态：线路标题 截「播放线路 N」标题行；线路数组 按官方样例用每条线路的容器锚点（与 播放数组 同锚点即可）。")
 			}
-		}
-		routeCount := len(routes)
-		if containerRoutes > routeCount {
-			routeCount = containerRoutes
-		}
-		if routeCount >= 2 {
-			lines = append(lines, fmt.Sprintf("  检测到 %d 条播放线路（「播放线路」标题 %d 个；线路容器独立截出 %d 段，每段都含分集链接）：这是多线路站，【必须写 线路数组】——线路数组 与 播放数组 用同一个列表容器锚点（%s&&%s）即可，引擎按容器切分线路；若每条线路有容器标题行（如 <h3 class=\"title\">…、data-dropdown-value=…），再写 线路标题 截它。",
-				routeCount, len(routes), containerRoutes, escapeGo(prefix), endTag))
-		} else if occurrences(body, prefix) >= 2 && routeCount < 2 {
-			lines = append(lines, fmt.Sprintf("  该容器出现 %d 次但独立截取只得到 %d 条有效线路：若确认只有一条线路，就不要写 线路数组（写了会把每一行拆成重复线路）。", occurrences(body, prefix), containerRoutes))
+		} else if occurrences(body, prefix) >= 2 {
+			lines = append(lines, fmt.Sprintf("  该容器出现 %d 次但独立截取只得到 %d 条有效线路：若确认只有一条线路，就不要写 线路数组（写了会把每一行拆成重复线路）。", occurrences(body, prefix), ev.containers))
 		}
 	}
-	if at := occurrences(body, "<li"); best > 0 && at >= best {
+	if at := occurrences(body, "<li"); votes > 0 && at >= votes {
 		lines = append(lines, fmt.Sprintf("  → 播放列表 可用 \"<li\"（注意是不带 > 的前缀：条目可能写成 <li ><a…，全文出现 %d 次）", at))
 	}
 	if at := occurrences(body, "</a>"); at >= len(matches) {
@@ -795,10 +1121,11 @@ func playBlock(body string) string {
 var navPattern = regexp.MustCompile(`(?i)<a[^>]+href="[^"]*?/(?:type|list|vodtype|show|fenlei)/([0-9a-zA-Z-]+)/?[^"]*"[^>]*>([^<>]{1,12})</a>`)
 var formPattern = regexp.MustCompile(`(?i)<form[^>]+action="([^"]*(?:search|so|wd)[^"]*)"[^>]*>`)
 
-func homeBlock(body string) string {
+func homeBlock(body, category string) string {
 	if body == "" {
 		return ""
 	}
+	catView := parseCategoryFinding(category)
 	var lines []string
 	seen := map[string]bool{}
 	var pairs []string
@@ -820,7 +1147,12 @@ func homeBlock(body string) string {
 		}
 	}
 	if len(pairs) > 0 {
-		lines = append(lines, "导航分类候选（名称$ID，顺序照抄）：\n  "+strings.Join(pairs, "#"))
+		if catView.Confirmed != "" && (catView.Status == "通过" || catView.Status == "部分通过") {
+			lines = append(lines, "分类字段【已实测】：使用上方「分类检测」的已实测分类串（真实抓取验证过 ID 有效），此处导航静态候选不再作为依据。")
+		} else {
+			lines = append(lines, "导航分类候选（名称$ID，未经实测，仅供参考）：\n  "+strings.Join(pairs, "#"))
+			lines = append(lines, "  ⚠ ID 是否有效取决于站点是否真按该段取分类——「分类检测」样本有实测结论时以它为准。")
+		}
 		if pageMatch := regexp.MustCompile(`(?i)/((?:type|list|vodtype)/[0-9a-zA-Z-]+/)2/`).FindStringSubmatch(body); pageMatch != nil {
 			lines = append(lines, fmt.Sprintf("  → 分页形态：/%s{catePg}/ —— 分类url 建议含 {cateId} 与 {catePg} 两段，如 …/type/{cateId}/{catePg}/…", pageMatch[1]))
 		} else if dashMatch := regexp.MustCompile(`(?i)/(list|vodlist|type)/(\d+)-2\.html`).FindStringSubmatch(body); dashMatch != nil {

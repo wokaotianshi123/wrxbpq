@@ -1,6 +1,7 @@
 package fingerprint
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/wrxbpq/wrxbpq/internal/ai"
@@ -32,10 +33,29 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 	category := rule.Field("分类url", "分类Url")
 	if rule.DeclaresField("分类url") || category != "" {
 		if !strings.Contains(category, "{catePg}") {
-			add("分类url", "缺少分页占位 {catePg}：翻页会一直停在第 1 页，验证 paging 步骤必挂。对照样本分页链接补上真实形态，如 /vodshow/{cateId}-{catePg}.html、…/type/{cateId}/{catePg}/…、查询串 …&pg={catePg}")
+			add("分类url", "缺少分页占位 {catePg}：翻页会一直停在第 1 页，验证 paging 步骤必挂。{catePg} 的具体形态（路径段/文件名段/查询参数）必须由真实拼接抓取两页比对来确认——先看指纹「分页实测」结论并照抄；没有实测结论时按样本分页链接写最可信的一种，以 paging 验证通过为准")
 		}
 		if !strings.HasPrefix(category, "http") && rule.Field("主页url", "首页url", "请求") == "" {
 			add("分类url", "规则省略了 主页url，分类url 就必须写含域名的绝对地址（https://站点域名/…）——相对路径无法定位站点，XBPQ 识别失败")
+		}
+	}
+
+	// 分类铁律（实测拦截）：指纹「分类检测」实测过哪些 ID 能出内容、哪些不能。
+	// 规则显式写的 分类 字段若含"实测失败分类"的 ID → 该分类点进去是空页，直接报出。
+	catView := parseCategoryFinding(pick(samples, "分类检测"))
+	if (catView.Status == "通过" || catView.Status == "部分通过") && rule.DeclaresField("分类") {
+		failedIDs := failedCategoryIDs(catView.Failed)
+		if len(failedIDs) > 0 {
+			for _, pair := range strings.Split(strings.TrimSpace(rule.Field("分类")), "#") {
+				dollar := strings.LastIndex(pair, "$")
+				if dollar < 0 {
+					continue
+				}
+				name, id := pair[:dollar], pair[dollar+1:]
+				if failedIDs[id] {
+					add("分类", "分类「"+name+"$"+id+"」的 ID "+id+" 在「分类检测」里实测失败（真实抓取该分类页取不出条目）——从 分类 字段删掉它或换用「已实测分类串」里的 ID，不要把点了没内容的分类塞给用户")
+				}
+			}
 		}
 	}
 
@@ -66,13 +86,13 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 		add("播放列表", "播放列表 是分隔符不是截取串，直接写 <li> 或留空（默认 #），去掉 &&")
 	}
 
+	// 多线路识别（与指纹四路证据一致）：
+	detail := pick(samples, "详情页")
+	ev := routeEvidenceOf(detail)
 	if route := rule.Field("线路数组"); route != "" {
 		if play := rule.Field("播放数组"); play != "" && sameStart(route, play) {
 			// 多线路站里 线路数组==播放数组 是正确写法；只有确认单线路时才报"拆重复线路"。
-			// 两路证据（与指纹判定一致）：①「播放线路 N」标题 ≥2；②把 线路数组 真喂给
-			// 截取引擎，独立截出 ≥2 段且每段含 /play/ 链接。任一成立即视为多线路不误报。
-			detail := pick(samples, "详情页")
-			routeTitles := routeTitlePattern.FindAllString(detail, -1)
+			// 任一证据（标题/容器段/hl按钮/dropdown）≥2 即视为多线路不误报。
 			containerRoutes := 0
 			if detail != "" && !strings.HasPrefix(route, "j:") {
 				for _, segment := range xbpq.List(detail, route) {
@@ -81,10 +101,15 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 					}
 				}
 			}
-			if len(routeTitles) < 2 && containerRoutes < 2 {
-				add("线路数组", "线路数组 与 播放数组 起始锚点相同且样本未见多线路（无「播放线路」标题、线路容器也独立截不出 ≥2 段）：会把同一线路的每一行拆成重复\"线路\"，单线路站必须删除 线路数组（多线路的锚点应是每条线路的容器标题行）")
+			if ev.titles < 2 && containerRoutes < 2 && ev.hlTabs < 2 && ev.dropdowns < 2 {
+				add("线路数组", "线路数组 与 播放数组 起始锚点相同且样本未见多线路（无「播放线路/播放源」标题、线路容器独立截不出 ≥2 段、无 ≥2 个 hl 按钮/dropdown 资源）：会把同一线路的每一行拆成重复\"线路\"，单线路站必须删除 线路数组（多线路的锚点应是每条线路的容器标题行）")
 			}
 		}
+	} else if ev.multi() && !strings.HasPrefix(rule.Field("播放数组"), "j:") {
+		// 反向校验：样本明显是多线路站（任一证据 ≥2），规则却没写 线路数组——
+		// 分集数会变成所有线路之和且无法切换线路，属确定性遗漏，直接报出回喂 AI。
+		add("播放数组", fmt.Sprintf("详情页样本检测到多线路（最强证据 %d 条：文字标题 %d、分集容器独立 %d 段、hl 按钮 %d、dropdown 资源 %d）但规则没写 线路数组：会把多条线路的分集混在一起、且无法切换线路。按指纹提示的形态补 线路数组（%s）",
+			ev.max(), ev.titles, ev.containers, ev.hlTabs, ev.dropdowns, routeFormHint(ev)))
 	}
 
 	// 提取合理性：数组+链接 组合喂给真实截取引擎，截出值"全是裸 ID"（无 / 无 http）说明
@@ -148,6 +173,24 @@ func sameStart(a, b string) bool {
 		return strings.TrimSpace(s)
 	}
 	return strings.TrimSuffix(cut(a), ">") == strings.TrimSuffix(cut(b), ">")
+}
+
+// failedCategoryIDs 从「实测失败分类」原文（Name(ID)、Name(ID)）里提取 ID 集合。
+func failedCategoryIDs(failed string) map[string]bool {
+	out := map[string]bool{}
+	for _, item := range strings.Split(failed, "、") {
+		item = strings.TrimSpace(item)
+		open := strings.LastIndex(item, "(")
+		close := strings.LastIndex(item, ")")
+		if open < 0 || close <= open {
+			continue
+		}
+		id := item[open+1 : close]
+		if id != "" && id != "?" {
+			out[id] = true
+		}
+	}
+	return out
 }
 
 func occurrencesInAll(samples []ai.Sample, token string) int {

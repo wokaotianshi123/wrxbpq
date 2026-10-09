@@ -3,6 +3,7 @@ package fingerprint
 import (
 	"context"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -182,7 +183,8 @@ func TestAnalyzeMacCMSStyleSite(t *testing.T) {
 	t.Logf("\n%s", text)
 	checks := map[string]string{
 		"播放数组建议用 ul 内层容器":  `播放数组 建议 "<ul class=\"stui-content__playlist clearfix\"&&</ul>"`,
-		"多线路指引":            "这是多线路站，【必须写 线路数组】",
+		"多线路指引":            "检测到多线路站",
+		"必须写线路数组":          "【必须写 线路数组】",
 		"player_aaaa 省略指引": "检测到 MacCMS player_aaaa 配置对象：跳转播放链接 建议【整个字段省略不写】",
 		"转义直链找到":           "https://vv.jisuzyv.com/play/abc/index.m3u8",
 		"数组+链接实测":          "截出指向 /vod/ 的可跳转链接",
@@ -304,5 +306,117 @@ func TestAnalyzeTemplateBlockPaging(t *testing.T) {
 	}
 	if !strings.Contains(text, "https://a.com/list/") {
 		t.Errorf("相对分类形态应给出含域名的绝对地址示例，实际指纹：\n%s", text)
+	}
+}
+
+// TestAnalyzePagingMeasuredWins 固化「分页实测优先」：样本里有实测通过的
+// 「分页实测」结论时，指纹必须采用实测模板（还原 {cateId}/{catePg} 占位）、
+// 标注【已实测】，并且不再输出"缺 {catePg}"的静态推断警示。
+func TestAnalyzePagingMeasuredWins(t *testing.T) {
+	stuiItems := ""
+	for i := 1; i <= 6; i++ {
+		stuiItems += `<a class="stui-vodlist__thumb" href="/v/` + strconv.Itoa(i) + `.html" title="片` + strconv.Itoa(i) + `"></a>`
+	}
+	samples := []ai.Sample{
+		{Label: "首页 https://a.com/", Content: `<html><body class="stui-x"><a href="/list/2-1.html">电视剧</a></body></html>`},
+		{Label: "分类页 https://a.com/list/2-1.html", Content: `<html><body class="stui-headers"><div>` + stuiItems + `</div></body></html>`},
+		{Label: "分页实测", Content: "分页实测 结论：通过\n实测分类url模板：\"https://a.com/list/2-{catePg}.html\"\n第2页实测地址：https://a.com/list/2-2.html\n与第1页条目重合仅 0%（第1页 6 条 / 第2页 6 条），确认翻页生效。"},
+	}
+	text := Analyze(samples)
+	t.Logf("\n%s", text)
+	if !strings.Contains(text, "分页形态【已实测】") {
+		t.Errorf("指纹应采用实测模板并标注已实测，实际：\n%s", text)
+	}
+	if !strings.Contains(text, `{cateId}-{catePg}`) {
+		t.Errorf("实测模板应还原 {cateId} 占位（list/2-… → list/{cateId}-…），实际：\n%s", text)
+	}
+	// 实测通过时不应再出现静态推断的缺占位警示
+	if strings.Contains(text, "⚠ 推断形态缺少分页占位") {
+		t.Errorf("实测已通过，不应残留静态推断缺 {catePg} 警示")
+	}
+}
+
+// TestNormalizePagingTemplate 固化实测模板的占位还原逻辑。
+func TestNormalizePagingTemplate(t *testing.T) {
+	cases := []struct {
+		name     string
+		guessed  string
+		measured string
+		want     string
+	}{
+		{"对齐还原", "https://a.com/list/{cateId}-{catePg}.html", "https://a.com/list/2-{catePg}.html", "https://a.com/list/{cateId}-{catePg}.html"},
+		{"位置推断还原", "", "https://a.com/type/5/{catePg}/", "https://a.com/type/{cateId}/{catePg}/"},
+		{"无 cateId 形态保持", "", "https://a.com/index.php/vod/show/page/{catePg}.html", "https://a.com/index.php/vod/show/page/{catePg}.html"},
+		{"对齐失败退回位置法", "https://a.com/other/{cateId}.html", "https://a.com/list/3-{catePg}.html", "https://a.com/list/{cateId}-{catePg}.html"},
+	}
+	for _, c := range cases {
+		if got := normalizePagingTemplate(c.guessed, c.measured); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestAnalyzeCategoryMeasuredWins 固化「分类实测优先」：样本里有「分类检测」
+// 通过结论时，homeBlock 不再让 AI 照抄未验证的导航候选，templateBlock
+// 采用实测 {cateId} 模板并显示分类检测原文。
+func TestAnalyzeCategoryMeasuredWins(t *testing.T) {
+	samples := []ai.Sample{
+		{Label: "首页 https://a.com/", Content: `<html><body class="stui-x"><a href="/list/1.html">电影</a><a href="/list/2.html">电视剧</a><a href="/list/4.html">动漫</a></body></html>`},
+		{Label: "分类检测", Content: "分类检测 结论：通过。\n已实测分类串：\"电影$1#电视剧$2\"（每条都真实抓取过且页面可提出 ≥3 个条目，分类字段从这里逐字取）\n实测失败分类：动漫(4)（抓取失败或页面无内容——不要放进分类字段）\n分类url 的 {cateId} 位置（实测）：路径段 \"list\" 中 \"1\" 一段（如 https://a.com/list/1.html）\n实测分类URL模板：\"https://a.com/list/{cateId}.html\""},
+	}
+	text := Analyze(samples)
+	t.Logf("\n%s", text)
+	if strings.Contains(text, "导航分类候选（名称$ID，顺序照抄）") {
+		t.Errorf("分类实测通过后不应再让 AI 照抄未验证候选，实际：\n%s", text)
+	}
+	if !strings.Contains(text, "分类字段【已实测】") {
+		t.Errorf("应提示改用实测分类串，实际：\n%s", text)
+	}
+	if !strings.Contains(text, "已实测分类串：\"电影$1#电视剧$2\"") {
+		t.Errorf("模板块应原文显示分类检测结论，实际：\n%s", text)
+	}
+}
+
+// TestTemplateBlockCategoryMergePaging 固化两路实测的合成：分类实测给出
+// {cateId} 骨架、分页未实测时，形态 = 实测骨架 + 推断分页尾巴，并明确标注
+// {catePg} 未实测。
+func TestTemplateBlockCategoryMergePaging(t *testing.T) {
+	samples := []ai.Sample{
+		{Label: "首页 https://a.com/", Content: `<html><body class="stui-x"><a href="/list/2-1.html">电视剧</a></body></html>`},
+		{Label: "分类检测", Content: "分类检测 结论：通过。\n已实测分类串：\"电影$1\"（略）\n实测分类URL模板：\"https://a.com/list/{cateId}.html\""},
+	}
+	text := Analyze(samples)
+	t.Logf("\n%s", text)
+	if !strings.Contains(text, `"/?https://a.com/list/{cateId}-{catePg}.html`) && !strings.Contains(text, `https://a.com/list/{cateId}-{catePg}.html`) {
+		t.Errorf("应以实测骨架拼上推断分页尾巴，实际：\n%s", text)
+	}
+	if !strings.Contains(text, "分类url 形态") {
+		t.Errorf("分类实测+分页未实测应走 categoryTplUsed 显示分支，实际：\n%s", text)
+	}
+}
+
+// TestCheckFailedCategoryID 固化自检拦截：规则 分类 里写了实测失败分类的 ID → 报错。
+func TestCheckFailedCategoryID(t *testing.T) {
+	samples := []ai.Sample{
+		{Label: "分类检测", Content: "分类检测 结论：部分通过。\n已实测分类串：\"电影$1\"（略）\n实测失败分类：动漫(4)（抓取失败或页面无内容——不要放进分类字段）\n实测分类URL模板：\"https://a.com/list/{cateId}.html\""},
+	}
+	ruleText := `{"主页url":"https://a.com","分类":"电影$1#动漫$4","分类url":"https://a.com/list/{cateId}/{catePg}/","数组":"<li>&&</li>"}`
+	issues := Check(ruleText, samples)
+	t.Logf("%v", issues)
+	found := false
+	for _, issue := range issues {
+		if issue.Field == "分类" && strings.Contains(issue.Problem, "实测失败") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("实测失败 ID 写进分类应被拦截，实际问题：%v", issues)
+	}
+	// 用实测通过的 ID 不应误报
+	okRule := `{"主页url":"https://a.com","分类":"电影$1","分类url":"https://a.com/list/{cateId}/{catePg}/","数组":"<li>&&</li>"}`
+	for _, issue := range Check(okRule, samples) {
+		if issue.Field == "分类" {
+			t.Errorf("通过的分类 ID 被误报：%v", issue)
+		}
 	}
 }

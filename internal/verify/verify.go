@@ -39,6 +39,11 @@ func Probe(ctx context.Context, siteURL string, limit int) ([]ai.Sample, error) 
 	}
 	samples = append(samples, ai.Sample{Label: "首页 " + siteURL, Content: clipHTML(home, limit)})
 
+	// 分类实测：导航候选分类逐个真实抓取，验证 {cateId} 段确实能出内容。
+	// 结论进「分类检测」样本，指纹与 AI 以此为准，不再拿导航扒的数字直接叫 AI 照抄。
+	categoryFinding := probeCategories(ctx, fetcher, siteURL, home)
+	samples = append(samples, ai.Sample{Label: "分类检测", Content: categoryFinding.Note})
+
 	// 链式探测：首页 → 分类页 → 详情页 → 播放页。
 	// 每一环都从上一步的真实页面里找链接，比在首页猜要准得多。
 	detailBody := ""
@@ -48,8 +53,11 @@ func Probe(ctx context.Context, siteURL string, limit int) ([]ai.Sample, error) 
 		address := xbpq.Absolute(siteURL+"/", categoryLink)
 		if body, err := fetcher.Get(ctx, address, siteURL+"/"); err == nil {
 			samples = append(samples, ai.Sample{Label: "分类页 " + address, Content: clipHTML(body, limit)})
-			if link := pickFirstHref(body, detailHints); link != "" {
-				detailAddress = xbpq.Absolute(address, link)
+			// 分页形态实测：拼第 2 页真抓回来和第 1 页比对，实测结论进「分页实测」样本。
+			finding := probePaging(ctx, fetcher, address, body)
+			samples = append(samples, ai.Sample{Label: "分页实测", Content: finding.Note})
+			if detail := pickFirstHref(body, detailHints); detail != "" {
+				detailAddress = xbpq.Absolute(address, detail)
 			}
 		}
 	}
