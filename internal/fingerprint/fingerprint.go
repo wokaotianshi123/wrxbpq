@@ -373,6 +373,11 @@ func normalizePagingTemplate(guessed, measured string) string {
 	if measured == "" {
 		return measured
 	}
+	// 实测模板若已同时含 {cateId} 与 {catePg}（锚定分类后的一次性实测），直接采用，
+	// 不再用骨架还原——避免把已经正确的双占位模板改坏。
+	if strings.Contains(measured, "{cateId}") && strings.Contains(measured, "{catePg}") {
+		return measured
+	}
 	if guessed != "" && strings.Contains(guessed, "{cateId}") {
 		parts := strings.SplitN(guessed, "{cateId}", 2)
 		head, tail := parts[0], parts[1]

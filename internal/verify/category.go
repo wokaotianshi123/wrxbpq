@@ -35,10 +35,11 @@ type categoryPair struct {
 
 // CategoryFinding 是分类实测的结论。
 type CategoryFinding struct {
-	Confirmed []categoryPair // 抓取验证通过的分类
-	Failed    []categoryPair // 抓取失败或无内容的分类
-	Template  string         // 交叉 diff 出的含 {cateId} 的分类 URL 模板
-	Note      string         // 面向 AI 的结论文本（进指纹样本，格式可被解析）
+	Confirmed  []categoryPair // 抓取验证通过的分类
+	Failed     []categoryPair // 抓取失败或无内容的分类
+	Template   string         // 交叉 diff 出的含 {cateId} 的分类 URL 模板
+	IDPosition idPosition     // {cateId} 在 URL 里的位置，供分页实测锚定分类、产出组合模板
+	Note       string         // 面向 AI 的结论文本（进指纹样本，格式可被解析）
 }
 
 // categoryCandidates 从首页提取分类候选：锚文本 1~6 字、href 是站内路径、
@@ -321,6 +322,46 @@ func (p idPosition) buildTemplate() string {
 	return parsed.Scheme + "://" + parsed.Host + parsed.Path + "?" + replaced
 }
 
+// substitute 把 raw URL 里 idPos 标出的分类 id 段替换成 placeholder（如 {cateId}）。
+// 分页实测在已知分类的前提下，用它在"第 1 页 / 第 2 页"两个 URL 上先把 {cateId} 还原，
+// 再单独抽出页码段作为 {catePg}，从而产出同时含两个占位的组合模板——
+// 而不是把分类号误当成页码、产出与 {cateId} 冲突的模板。
+func (p idPosition) substitute(raw, placeholder string) string {
+	id := p.extractID(raw)
+	if id == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if p.pathIndex >= 0 {
+		segments := strings.Split(parsed.Path, "/")
+		if p.pathIndex >= len(segments) {
+			return ""
+		}
+		segment := segments[p.pathIndex]
+		if len(segment) < p.prefix+len(id) || segment[p.prefix:p.prefix+len(id)] != id {
+			return ""
+		}
+		segments[p.pathIndex] = segment[:p.prefix] + placeholder + segment[p.prefix+len(id):]
+		out := parsed.Scheme + "://" + parsed.Host + strings.Join(segments, "/")
+		if parsed.RawQuery != "" {
+			out += "?" + parsed.RawQuery
+		}
+		return out
+	}
+	if p.queryKey == "" {
+		return ""
+	}
+	q := parsed.Query()
+	if q.Get(p.queryKey) != id {
+		return ""
+	}
+	q.Set(p.queryKey, placeholder)
+	return parsed.Scheme + "://" + parsed.Host + parsed.Path + "?" + q.Encode()
+}
+
 // probeCategories 分类实测主流程：提取候选 → diff 出 id 位置 → 并发真实抓取 → 比对。
 func probeCategories(ctx context.Context, fetcher *xbpq.Fetcher, siteURL, homeBody string) CategoryFinding {
 	pairs := categoryCandidates(siteURL, homeBody)
@@ -405,6 +446,7 @@ func probeCategories(ctx context.Context, fetcher *xbpq.Fetcher, siteURL, homeBo
 	}
 
 	finding.Template = position.buildTemplate()
+	finding.IDPosition = position
 	finding.Note = renderCategoryNote(finding, position, suspectSame)
 	return finding
 }

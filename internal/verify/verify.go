@@ -49,12 +49,20 @@ func Probe(ctx context.Context, siteURL string, limit int) ([]ai.Sample, error) 
 	detailBody := ""
 	detailAddress := ""
 
-	if categoryLink := pickFirstHref(home, categoryHints); categoryLink != "" {
-		address := xbpq.Absolute(siteURL+"/", categoryLink)
+	// 分页实测的锚点：优先用「分类检测」已实测通过的分类 URL——这样分页探测会锁定
+	// 该 {cateId}，不会把"下一类"链接误当"下一页"，从而产出含 {cateId}+{catePg} 的组合模板。
+	pagingBase := ""
+	if len(categoryFinding.Confirmed) > 0 {
+		pagingBase = categoryFinding.Confirmed[0].URL
+	} else if categoryLink := pickFirstHref(home, categoryHints); categoryLink != "" {
+		pagingBase = xbpq.Absolute(siteURL+"/", categoryLink)
+	}
+	if pagingBase != "" {
+		address := pagingBase
 		if body, err := fetcher.Get(ctx, address, siteURL+"/"); err == nil {
 			samples = append(samples, ai.Sample{Label: "分类页 " + address, Content: clipHTML(body, limit)})
 			// 分页形态实测：拼第 2 页真抓回来和第 1 页比对，实测结论进「分页实测」样本。
-			finding := probePaging(ctx, fetcher, address, body)
+			finding := probePaging(ctx, fetcher, address, body, categoryFinding.IDPosition)
 			samples = append(samples, ai.Sample{Label: "分页实测", Content: finding.Note})
 			if detail := pickFirstHref(body, detailHints); detail != "" {
 				detailAddress = xbpq.Absolute(address, detail)

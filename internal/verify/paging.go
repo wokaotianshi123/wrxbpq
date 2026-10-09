@@ -33,11 +33,14 @@ var (
 )
 
 // probePaging 对分类页做分页实测。catalogBody 用未裁剪的完整页面。
-func probePaging(ctx context.Context, fetcher *xbpq.Fetcher, catalogURL, catalogBody string) PagingFinding {
+// idPos 是「分类检测」实测出的 {cateId} 位置：传入后分页探测会锚定在该分类上，
+// 候选链接必须保持同一 {cateId}，从而把"下一类"链接排除、只认真正的下一页，
+// 最终产出同时含 {cateId} 与 {catePg} 的组合模板（二者位置均来自实测）。
+func probePaging(ctx context.Context, fetcher *xbpq.Fetcher, catalogURL, catalogBody string, idPos idPosition) PagingFinding {
 	if strings.TrimSpace(catalogURL) == "" || strings.TrimSpace(catalogBody) == "" {
 		return PagingFinding{Note: "分页实测 结论：跳过（缺少分类页样本）。"}
 	}
-	candidates := pagingCandidates(catalogURL, catalogBody)
+	candidates := pagingCandidates(catalogURL, catalogBody, idPos)
 	if len(candidates) == 0 {
 		return PagingFinding{Note: "分页实测 结论：跳过（分类页里未找到「下一页/页码」链接，可能是 AJAX 翻页或该分类只有一页）。{catePg} 未经实测——先按样本最像页码的段写，最终以验证 paging 步骤实测为准。"}
 	}
@@ -52,9 +55,20 @@ func probePaging(ctx context.Context, fetcher *xbpq.Fetcher, catalogURL, catalog
 	}
 	var failures []string
 	for _, candidate := range candidates {
-		template, firstPage, secondPage, ok := buildPagingTemplate(catalogURL, candidate)
+		var template, firstPage, secondPage string
+		var ok bool
+		if idPosValid(idPos) {
+			// 已锚定分类：在同一 {cateId} 内探页码，直接产出含 {cateId}+{catePg} 的组合模板。
+			template, ok = buildCombinedTemplate(catalogURL, candidate, idPos)
+		} else {
+			template, firstPage, secondPage, ok = buildPagingTemplate(catalogURL, candidate)
+		}
 		if !ok {
-			failures = append(failures, fmt.Sprintf("%s（与第1页的差异段 %s→%s 不是 +1 数字，不像页码）", candidate, digitOrDash(firstPage), digitOrDash(secondPage)))
+			if idPosValid(idPos) {
+				failures = append(failures, fmt.Sprintf("%s（与第1页差异不能解析为页码——可能该链接是其它分类而非下一页）", candidate))
+			} else {
+				failures = append(failures, fmt.Sprintf("%s（与第1页的差异段 %s→%s 不是 +1 数字，不像页码）", candidate, digitOrDash(firstPage), digitOrDash(secondPage)))
+			}
 			continue
 		}
 		body, err := fetcher.Get(ctx, candidate, catalogURL)
@@ -73,12 +87,18 @@ func probePaging(ctx context.Context, fetcher *xbpq.Fetcher, catalogURL, catalog
 			failures = append(failures, fmt.Sprintf("%s（内容与第1页重合 %d%%，差异段不是页码而是筛选值）", candidate, score))
 			continue
 		}
+		note := fmt.Sprintf("分页实测 结论：通过\n实测分类url模板：\"%s\"\n第2页实测地址：%s\n与第1页条目重合仅 %d%%（第1页 %d 条 / 第2页 %d 条），确认翻页生效。",
+			template, candidate, score, len(first), len(second))
+		if idPosValid(idPos) {
+			note += "该模板已同时含 {cateId}（位置来自「分类检测」实测）与 {catePg}，二者均为实测结论，直接整体照抄，不要再按静态推断拆改形态。"
+		} else {
+			note += "写 分类url 时页码段逐字用 {catePg} 替换上面模板里的页码数字（其余段与筛选占位按需保留）——这是【实测结论】，优先级高于任何静态推断。"
+		}
 		return PagingFinding{
 			Confirmed: true,
 			Template:  template,
 			SecondURL: candidate,
-			Note: fmt.Sprintf("分页实测 结论：通过\n实测分类url模板：\"%s\"\n第2页实测地址：%s\n与第1页条目重合仅 %d%%（第1页 %d 条 / 第2页 %d 条），确认翻页生效。写 分类url 时页码段逐字用 {catePg} 替换上面模板里的页码数字（其余段与筛选占位按需保留）——这是【实测结论】，优先级高于任何静态推断。",
-				template, candidate, score, len(first), len(second)),
+			Note:      note,
 		}
 	}
 	return PagingFinding{Note: "分页实测 结论：未通过\n已试候选拼接页：" + strings.Join(capList(failures), "\n") +
@@ -111,13 +131,18 @@ func errText(err error) string {
 
 // pagingCandidates 从分类页找"疑似下一页"链接（最多 4 个，去重）：
 // ①a 标签文字是 下一页/next；②href 与当前分类 URL 只差一段且该段是数字。
-func pagingCandidates(catalogURL, catalogBody string) []string {
+// idPos 有效时额外要求候选保持同一 {cateId}——把"下一类"链接排除，只认真正的下一页。
+func pagingCandidates(catalogURL, catalogBody string, idPos idPosition) []string {
 	base, err := url.Parse(catalogURL)
 	if err != nil {
 		return nil
 	}
 	seen := map[string]bool{}
 	var out []string
+	var baseID string
+	if idPosValid(idPos) {
+		baseID = idPos.extractID(catalogURL)
+	}
 	for _, tag := range aTagClosePattern.FindAllString(catalogBody, 500) {
 		href := hrefExtractPattern.FindStringSubmatch(tag)
 		if href == nil {
@@ -136,8 +161,18 @@ func pagingCandidates(catalogURL, catalogBody string) []string {
 		if other.Path == base.Path && other.RawQuery == base.RawQuery {
 			continue
 		}
+		// 已锚定分类：候选必须保持同一 {cateId}，否则它是"下一类"链接而非"下一页"，
+		// 会让分页把分类号误当页码，产出与 {cateId} 冲突的错误模板。
+		if idPosValid(idPos) && idPos.extractID(absolute) != baseID {
+			continue
+		}
 		qualified := nextPageLabelPattern.MatchString(tag) ||
 			differsByNumber(base.String(), other.String())
+		if idPosValid(idPos) {
+			// 已锚定分类：同 {cateId} 链接即视为页码候选（如 ?page=2 形态无 +1 数字差异），
+			// 是否真翻页由后面"抓取+内容重合"判定把关。
+			qualified = true
+		}
 		if !qualified {
 			continue
 		}
@@ -148,6 +183,68 @@ func pagingCandidates(catalogURL, catalogBody string) []string {
 		}
 	}
 	return out
+}
+
+// idPosValid 分类 id 位置是否已被实测确定（path 段或 query 参数）。
+// 注意：URL 按 "/" 切分后第 0 段恒为空串，所以合法的 pathIndex 必然 ≥1；
+// 0（idPosition 零值）表示"未实测到位置"，必须判为无效，否则会把无位置误当有效。
+func idPosValid(p idPosition) bool {
+	return p.pathIndex > 0 || p.queryKey != ""
+}
+
+// firstDigitRun 返回字符串里第一个连续数字段（用于从分页差异里抽页码 token）。
+func firstDigitRun(s string) string {
+	start := -1
+	for i, r := range s {
+		if r >= '0' && r <= '9' {
+			if start < 0 {
+				start = i
+			}
+		} else if start >= 0 {
+			return s[start:i]
+		}
+	}
+	if start >= 0 {
+		return s[start:]
+	}
+	return ""
+}
+
+// buildCombinedTemplate 在已知分类 id 位置的前提下，由（第1页 URL, 候选页 URL）产出
+// 同时含 {cateId} 与 {catePg} 的组合模板：先把两 URL 的 {cateId} 段还原成占位符，
+// 再对剩余差异段抽页码数字替换为 {catePg}，分隔符原样保留——这样 {cateId} 与 {catePg}
+// 各占其真实位置，不再被当作同一个槽位互相覆盖。
+// 例：list/2.html + list/2-2.html → list/{cateId}-{catePg}.html；
+//
+//	list/2.html + list/2/2.html   → list/{cateId}/{catePg}.html；
+//	list/2.html + list/2.html?page=2 → list/{cateId}.html?page={catePg}。
+func buildCombinedTemplate(catalogURL, candidate string, idPos idPosition) (string, bool) {
+	base2 := idPos.substitute(catalogURL, "{cateId}")
+	cand2 := idPos.substitute(candidate, "{cateId}")
+	if base2 == "" || cand2 == "" {
+		return "", false
+	}
+	prefix := commonPrefixLen(base2, cand2)
+	restB := base2[prefix:]
+	restC := cand2[prefix:]
+	suffix := commonSuffixLen(restB, restC)
+	if suffix > len(restB) || suffix > len(restC) {
+		return "", false
+	}
+	candMid := restC[:len(restC)-suffix]
+	if candMid == "" {
+		return "", false
+	}
+	pageToken := firstDigitRun(candMid)
+	var tmplMid string
+	if pageToken == "" {
+		// 退化：整段差异即页码（slug 形态），整体替换。
+		tmplMid = "{catePg}"
+	} else {
+		tmplMid = strings.Replace(candMid, pageToken, "{catePg}", 1)
+	}
+	template := base2[:prefix] + tmplMid + restB[len(restB)-suffix:]
+	return template, true
 }
 
 // differsByNumber a、b 仅差一段且该段是 +1 关系的数字。
