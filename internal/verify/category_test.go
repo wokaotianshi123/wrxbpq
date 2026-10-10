@@ -224,3 +224,73 @@ func TestProbeCategoriesSamePageSuspect(t *testing.T) {
 		t.Errorf("id 未生效时不应判完全通过：\n%s", finding.Note)
 	}
 }
+
+// TestCategoryCandidatesNoiseWords 复现 6789zz.com 问题2 第一层：
+// 导航里的"热门电视剧/最新电影"等榜单/推荐位链接不是独立分类，
+// 锚文本含 热门|最新|排行|推荐 等词应在候选阶段直接剔除。
+func TestCategoryCandidatesNoiseWords(t *testing.T) {
+	body := `<nav>
+<a href="/list/2.html">电视剧</a><a href="/list/1.html">电影</a>
+<a href="/show/2--hits---------.html">热门电视剧</a>
+<a href="/show/1--time---------.html">最新电影</a>
+<a href="/list/5.html">短剧</a>
+</nav>`
+	pairs := categoryCandidates("https://x.com", body)
+	if len(pairs) != 3 {
+		t.Fatalf("榜单/推荐位应被噪音词过滤，期望 3 个候选，实际 %d: %+v", len(pairs), pairs)
+	}
+	for _, p := range pairs {
+		if strings.Contains(p.Name, "热门") || strings.Contains(p.Name, "最新") {
+			t.Errorf("噪音分类混入候选：%+v", p)
+		}
+	}
+}
+
+// TestProbeCategoriesDedupSameID 复现 6789zz.com 问题2 第二层（兜底闸门）：
+// 即便榜单链接锚文本没命中噪音词（如叫"热播好剧"），它与"电视剧"提取出同一个 ID，
+// 按 ID 去重后分类串也不应出现重复 ID（电视剧$2#…#xxx$2）。
+func TestProbeCategoriesDedupSameID(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Write([]byte(`<html><body><nav>
+<a href="/list/1.html">电影</a><a href="/list/2.html">电视剧</a><a href="/list/2-x.html">剧集精选</a>
+</nav></body></html>`))
+		default:
+			id := "0"
+			for _, r := range r.URL.Path {
+				if r >= '0' && r <= '9' {
+					id = string(r)
+					break
+				}
+			}
+			page := ""
+			for i := 1; i <= 6; i++ {
+				page += fmt.Sprintf(`<a href="/v/%s/%d.html" title="片%d"></a>`, id, i, i)
+			}
+			w.Write([]byte(`<html><body class="stui-headers"><div>` + page + `</div></body></html>`))
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	fetcher := xbpq.NewFetcher("")
+	home, _ := fetcher.Get(context.Background(), server.URL+"/", "")
+	finding := probeCategories(context.Background(), fetcher, server.URL, home)
+	t.Logf("note:\n%s", finding.Note)
+	if !strings.Contains(finding.Note, `已实测分类串："电影$1#电视剧$2"`) {
+		t.Errorf("同 ID 去重后分类串应只剩主分类，实际：\n%s", finding.Note)
+	}
+	if strings.Contains(finding.Note, "剧集精选") {
+		t.Errorf("同 ID 榜单项不应进实测分类串：\n%s", finding.Note)
+	}
+	// Confirmed 里不得出现重复 ID
+	seen := map[string]bool{}
+	for _, pair := range finding.Confirmed {
+		if seen[pair.ID] {
+			t.Errorf("Confirmed 出现重复 ID %q：%+v", pair.ID, finding.Confirmed)
+		}
+		seen[pair.ID] = true
+	}
+}

@@ -258,3 +258,71 @@ func TestProbePagingSynthFailReportsTried(t *testing.T) {
 		t.Errorf("失败结论应列出试过的拼接候选，实际：\n%s", finding.Note)
 	}
 }
+
+// TestProbePagingRejectsCrossDirSortLink 复现 6789zz.com 式误判：
+// 分类页 /list/2.html 里挂着一条指向 /show/2--hits---------.html 的「下一页」链接
+// （MacCMS 的"本分类按热门排序"页，同 cateId=2 但跨目录）。
+// 旧逻辑下「下一页」文字豁免跨目录约束，buildCombinedTemplate 又把整段差异
+// 吐成 {catePg}，产出 https://host/{catePg}.html 这种丢掉 /list/ 目录和 {cateId}
+// 的垃圾模板还误标"通过"。修复后：跨目录+排序词双重闸门拒绝该链接，
+// 分页回退到同目录合成实测（/list/2-2.html 形态）。
+func TestProbePagingRejectsCrossDirSortLink(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/list/2.html": // 分类第 1 页：只有跨目录的"下一页"（实为排序榜单）
+			page := ""
+			for i := 1; i <= 12; i++ {
+				page += fmt.Sprintf(`<a href="/p1/%d.html" title="剧%d"></a>`, i, i)
+			}
+			w.Write([]byte(`<html><body><div>` + page + `</div>
+<a href="/show/2--hits---------.html">下一页</a><a href="/show/2--time---------.html">最新</a></body></html>`))
+		case "/show/2--hits---------.html": // 排序榜单页：内容与第 1 页不重合（会骗过重合率判据）
+			page := ""
+			for i := 1; i <= 12; i++ {
+				page += fmt.Sprintf(`<a href="/hot/%d.html" title="热%d"></a>`, i, i)
+			}
+			w.Write([]byte(`<html><body><div>` + page + `</div></body></html>`))
+		case "/list/2-2.html": // 真正的第 2 页（同目录连字符形态）
+			page := ""
+			for i := 1; i <= 12; i++ {
+				page += fmt.Sprintf(`<a href="/p2/%d.html" title="剧下%d"></a>`, i, i)
+			}
+			w.Write([]byte(`<html><body><div>` + page + `</div></body></html>`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`<html><body>not found</body></html>`))
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	fetcher := xbpq.NewFetcher("")
+	base := server.URL + "/list/2.html"
+	body := mustGet(t, fetcher, base)
+	idPos := idPosition{pathIndex: 2, prefix: 0, tokenLen: 1, exampleID: "2", examplePath: base}
+
+	finding := probePaging(context.Background(), fetcher, base, body, idPos)
+	if !finding.Confirmed {
+		t.Fatalf("同目录合成实测应成功，实际：\n%s", finding.Note)
+	}
+	if finding.Template != server.URL+"/list/{cateId}-{catePg}.html" {
+		t.Errorf("组合模板 = %q，期望 %q（保留 /list/ 目录与 {cateId}）",
+			finding.Template, server.URL+"/list/{cateId}-{catePg}.html")
+	}
+	if strings.Contains(finding.Template, "{cateId}") == false {
+		t.Errorf("模板缺 {cateId}：%q", finding.Template)
+	}
+	if strings.Contains(finding.Note, "/show/") || strings.Contains(finding.SecondURL, "/show/") {
+		t.Errorf("跨目录排序链接 /show/… 不应被当成下一页：\n%s", finding.Note)
+	}
+
+	// 单元级：buildCombinedTemplate 对跨目录候选直接拒绝，绝不产出缺 {cateId} 的模板。
+	if tmpl, ok := buildCombinedTemplate(base, server.URL+"/show/2--hits---------.html", idPos); ok {
+		t.Errorf("跨目录候选不应生成模板，实际：%q", tmpl)
+	}
+	// 单元级：pagingCandidates 锚定后不把跨目录"下一页"收进候选。
+	if got := pagingCandidates(base, body, idPos); len(got) != 0 {
+		t.Errorf("锚定后跨目录候选应被过滤，实际：%v", got)
+	}
+}

@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 set PORT=8686
 set EXE=wrxbpq.exe
 

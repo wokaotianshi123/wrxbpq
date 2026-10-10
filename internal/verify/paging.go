@@ -31,6 +31,9 @@ var (
 	aTagClosePattern     = regexp.MustCompile(`(?is)<a\b[^>]*>.+?</a>`)
 	hrefExtractPattern   = regexp.MustCompile(`(?i)href="([^"]+)"`)
 	htmlTitlePattern     = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+	// sortWordPattern 链接文字里出现这些词＝排序/榜单入口（按热门/最新等），
+	// 不是"下一页"。锚定分类时即便它同 {cateId}，也不能拿来当页码实测。
+	sortWordPattern = regexp.MustCompile(`(?i)热门|热播|最新|排行|榜单|top|hits|score|hot`)
 )
 
 // pageTitleLabel 取 <title> 里第一个分隔符之前的部分作为"当前栏目/分类名"。
@@ -86,7 +89,7 @@ func probePaging(ctx context.Context, fetcher *xbpq.Fetcher, catalogURL, catalog
 			// 已锚定分类：在同一 {cateId} 内探页码，直接产出含 {cateId}+{catePg} 的组合模板。
 			template, ok = buildCombinedTemplate(catalogURL, candidate, idPos)
 			if !ok {
-				return PagingFinding{}, "该链接与第1页的差异不能解析为页码（多半是其它分类而非下一页）"
+				return PagingFinding{}, "该链接与第1页的差异不能解析为页码（多半是其它分类或排序/筛选链接，而非下一页）"
 			}
 		} else {
 			var firstPage, secondPage string
@@ -217,15 +220,33 @@ func pagingCandidates(catalogURL, catalogBody string, idPos idPosition) []string
 		// 【结构性硬约束】候选路径与基准路径至多只能有一段不同，除非它带「下一页/next」文字。
 		// 跨目录链接（如 /vodtype/1.html → /voddetail/175828.html，差 2 段）是另一种页面
 		// （详情页 / 其它栏目），内容天然与分类页不同，会骗过"重合率低 = 翻页生效"的判据。
-		// 带明确「下一页」文字的链接是强信号，豁免这条约束（少数站分页区路径确实不同）。
+		// 带明确「下一页」文字的链接是强信号，未锚定时豁免这条约束（少数站分页区路径确实不同）。
 		labelled := nextPageLabelPattern.MatchString(tag)
 		if labelled == false && base.Path != other.Path && !atMostOnePathSegmentDiff(base.Path, other.Path) {
 			continue
 		}
 		// 已锚定分类：候选必须保持同一 {cateId}，否则它是"下一类"链接而非"下一页"，
 		// 会让分页把分类号误当页码，产出与 {cateId} 冲突的错误模板。
-		if idPosValid(idPos) && idPos.extractID(absolute) != baseID {
-			continue
+		if idPosValid(idPos) {
+			if idPos.extractID(absolute) != baseID {
+				continue
+			}
+			// 【锚定加严①】排序/榜单入口（文字含 热门/最新/排行/top 等）不是"下一页"：
+			// MacCMS 类站点会把 /show/2--hits---------.html 做成"本分类按热门排序"的链接，
+			// 它与分类页同 {cateId}、甚至同名栏目，但内容是同分类的另一张榜单而非第 2 页。
+			// 只看锚文本（不看整个标签，避免 class="top" 之类属性误伤真下一页）。
+			if sortWordPattern.MatchString(anchorLabel(tag)) {
+				continue
+			}
+			// 【锚定加严②】已实测出 {cateId} 位置时，「下一页」文字不再豁免跨目录约束：
+			// 候选必须仍位于分类页自己的目录内（6789zz 式站点会把 /show/2--hits---.html
+			// 这类排序/筛选链接标成"下一页"，它是本分类的另一张榜单而非第 2 页；
+			// 放进来会让组合模板丢掉 /list/ 目录与 {cateId}，产出 /{catePg}.html 垃圾模板）。
+			// 真正的 {catePg} 交给 synthPagingCandidates 在已实测 {cateId} 模板的同目录内
+			// 拼接 -2 / _2 / /2 / ?page=2 等形态逐一实测。
+			if !sameCategoryPath(base.Path, other.Path, idPos) {
+				continue
+			}
 		}
 		qualified := nextPageLabelPattern.MatchString(tag) ||
 			differsByNumber(base.String(), other.String())
@@ -244,6 +265,36 @@ func pagingCandidates(catalogURL, catalogBody string, idPos idPosition) []string
 		}
 	}
 	return out
+}
+
+// sameCategoryPath 判断候选链接是否仍在分类页"自己的目录"内（锚定 {cateId} 后的硬闸门）。
+// 分页只会发生在携带 {cateId} 的那一段里或其后追加页码段：
+//
+//	/list/2.html → /list/2-2.html、/list/2/2.html、/list.php?typeid=2&page=2 都算同目录；
+//	/list/2.html → /show/2--hits---------.html 目录段 list≠show，是排序/榜单页，拒绝。
+//
+// 未锚定分类时（idPos 无效）调用方仍用旧的"至多一段差异+下一页豁免"策略，不走这里。
+func sameCategoryPath(basePath, otherPath string, idPos idPosition) bool {
+	if idPos.pathIndex <= 0 {
+		// query 形态的 {cateId}：路径部分必须落在同一目录（最后一个 "/" 之前逐字一致）。
+		cutB := strings.LastIndex(basePath, "/")
+		cutO := strings.LastIndex(otherPath, "/")
+		if cutB < 0 || cutO < 0 {
+			return basePath == otherPath
+		}
+		return basePath[:cutB] == otherPath[:cutO]
+	}
+	a := strings.Split(basePath, "/")
+	b := strings.Split(otherPath, "/")
+	if len(b) < len(a) {
+		return false
+	}
+	for i := 0; i < idPos.pathIndex && i < len(a); i++ {
+		if a[i] != b[i] {
+			return false // {cateId} 之前的目录段不同 → 跨栏目/跨页面类型，不是本分类的页码
+		}
+	}
+	return true
 }
 
 // atMostOnePathSegmentDiff 判定两条路径是否"至多一段不同"。
@@ -387,7 +438,27 @@ func buildCombinedTemplate(catalogURL, candidate string, idPos idPosition) (stri
 		tmplMid = strings.Replace(candMid, pageToken, "{catePg}", 1)
 	}
 	template := base2[:prefix] + tmplMid + restB[len(restB)-suffix:]
+	// 【双占位后置校验】锚定实测下页码必须发生在 {cateId} 所在目录内，产出的组合模板
+	// 必须同时含 {cateId} 与 {catePg}。若公共前缀短到把 base 的目录段都吃掉
+	// （6789zz 式：base=/list/{cateId}.html 对 cand=/show/{cateId}--hits---.html，
+	// 前缀只剩 host+"/"，整段 /show/… 被吐成 {catePg}），那说明候选是跨目录的
+	// 排序/筛选页而非下一页——拒绝，让分页回退到同目录合成实测。
+	if !strings.Contains(template, "{cateId}") || !strings.Contains(template, "{catePg}") {
+		return "", false
+	}
+	if !sameCategoryPath(parsedBasePath(base2), parsedBasePath(cand2), idPos) {
+		return "", false
+	}
 	return template, true
+}
+
+// parsedBasePath 取 URL 串里路径部分（scheme://host 之后、?query 之前），供目录比对。
+func parsedBasePath(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	return parsed.Path
 }
 
 // differsByNumber a、b 仅差一段且该段是 +1 关系的数字。

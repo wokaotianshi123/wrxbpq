@@ -21,7 +21,10 @@ import (
 )
 
 // categoryNoiseWords 导航里常见的非分类锚文本。
-var categoryNoisePattern = regexp.MustCompile(`首页|更多|下一?页|上一条|下一条|搜索|登录|注册|排行|榜单|专题|公告|留言|帮助|下载|直播|顶`)
+// 末组（热门|热播|最新|推荐|大全|专区）是"子分类/推荐位/榜单"前缀词：
+// 这类链接（如"热门电视剧"）指向的往往是主分类同 ID 的榜单页，不是独立分类，
+// 放进分类串会产出 电视剧$2#…#热门电视剧$2 这种重复 ID 的非法分类字段。
+var categoryNoisePattern = regexp.MustCompile(`首页|更多|下一?页|上一条|下一条|搜索|登录|注册|排行|榜单|专题|公告|留言|帮助|下载|直播|顶|热门|热播|最新|推荐|大全|专区`)
 
 var anchorInnerPattern = regexp.MustCompile(`(?is)<a\b[^>]*>(.*)</a>`)
 var stripTagPattern = regexp.MustCompile(`<[^>]*>`)
@@ -88,6 +91,15 @@ func categoryCandidates(siteURL, homeBody string) []categoryPair {
 
 func collapseText(s string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(s)), "")
+}
+
+// anchorLabel 取一个 a 标签的锚文本（去嵌套标签、折叠空白），供排序/榜单词识别。
+func anchorLabel(tag string) string {
+	inner := anchorInnerPattern.FindStringSubmatch(tag)
+	if inner == nil {
+		return ""
+	}
+	return collapseText(stripTagPattern.ReplaceAllString(inner[1], ""))
 }
 
 func mustHost(address string) string {
@@ -414,6 +426,24 @@ func probeCategories(ctx context.Context, fetcher *xbpq.Fetcher, siteURL, homeBo
 	}
 	for index := range pairs {
 		pairs[index].ID = position.extractID(pairs[index].URL)
+	}
+	// 【按 ID 去重】导航里除了主分类还常挂"热门电视剧/最新电影"之类的榜单/推荐位链接，
+	// 它们与主分类同 ID（电视剧$2 和 热门电视剧$2 都指向 id=2），若同时收进候选，
+	// 已实测分类串会混入非主要分类、且出现重复 ID 的非法分类字段。
+	// 同一 ID 只保留首个候选（导航里主分类通常在榜单链接之前）。
+	{
+		kept := pairs[:0]
+		idSeen := map[string]bool{}
+		for _, pair := range pairs {
+			if pair.ID != "" {
+				if idSeen[pair.ID] {
+					continue
+				}
+				idSeen[pair.ID] = true
+			}
+			kept = append(kept, pair)
+		}
+		pairs = kept
 	}
 
 	// 并发抓取验证（最多 6 条，单条 12s，整体 45s）。
