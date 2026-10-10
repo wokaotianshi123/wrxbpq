@@ -48,6 +48,7 @@ func Probe(ctx context.Context, siteURL string, limit int) ([]ai.Sample, error) 
 	// 每一环都从上一步的真实页面里找链接，比在首页猜要准得多。
 	detailBody := ""
 	detailAddress := ""
+	directPlay := "" // 分类页/首页直挂的播放链接（详情环节断链时的兜底）
 
 	// 分页实测的锚点：优先用「分类检测」已实测通过的分类 URL——这样分页探测会锁定
 	// 该 {cateId}，不会把"下一类"链接误当"下一页"，从而产出含 {cateId}+{catePg} 的组合模板。
@@ -67,11 +68,22 @@ func Probe(ctx context.Context, siteURL string, limit int) ([]ai.Sample, error) 
 			if detail := pickFirstHref(body, detailHints); detail != "" {
 				detailAddress = xbpq.Absolute(address, detail)
 			}
+			// 分类页里就有播放链接（部分站列表直接挂 /vodplay/…）：留作详情抓取失败时的兜底。
+			if play := pickFirstHref(body, playHints); play != "" {
+				directPlay = xbpq.Absolute(address, play)
+			}
 		}
 	}
 	if detailAddress == "" {
 		if link := pickFirstHref(home, detailHints); link != "" {
 			detailAddress = xbpq.Absolute(siteURL+"/", link)
+		}
+	}
+	// 首页直挂播放链接（zmwgy.net 式 MacCMS：首页只有 /voddetail/ 与 /vodplay/，
+	// 详情路径形态可能没进 detailHints 或详情抓取失败）：兜底样本别丢。
+	if directPlay == "" {
+		if play := pickFirstHref(home, playHints); play != "" {
+			directPlay = xbpq.Absolute(siteURL+"/", play)
 		}
 	}
 	if detailAddress != "" {
@@ -80,25 +92,65 @@ func Probe(ctx context.Context, siteURL string, limit int) ([]ai.Sample, error) 
 			samples = append(samples, ai.Sample{Label: "详情页 " + detailAddress, Content: clipHTML(body, limit)})
 		}
 	}
-	if detailBody != "" {
-		if playLink := pickFirstHref(detailBody, playHints); playLink != "" {
-			playAddress := xbpq.Absolute(detailAddress, playLink)
-			if playBody, playErr := fetcher.Get(ctx, playAddress, detailAddress); playErr == nil {
-				// 播放页是关键证据，给它更大的预算，别把藏直链的 script 截掉。
-				samples = append(samples, ai.Sample{Label: "播放页 " + playAddress, Content: clipHTML(playBody, limit*3/2)})
-			}
+	playCaptured := false
+	if playLink := pickFirstHref(detailBody, playHints); playLink != "" {
+		playCaptured = fetchPlay(ctx, fetcher, xbpq.Absolute(detailAddress, playLink), detailAddress, &samples, limit)
+	} else if directPlay != "" {
+		playCaptured = fetchPlay(ctx, fetcher, directPlay, detailAddress, &samples, limit)
+	}
+	// 播放页没抓到样本（命名不在识别模式 / 抓取失败）→ 给诊断提示，别让 AI 对着没有播放页的样本瞎猜。
+	if !playCaptured {
+		unmatched := scanUnmatchedPlayHref(detailBody)
+		if unmatched == "" {
+			unmatched = scanUnmatchedPlayHref(home)
 		}
+		hint := "样本中未抓到播放页（详情页里没找到可识别的播放链接，或抓取失败）。"
+		if unmatched != "" {
+			hint += "详情页存在疑似播放链接但未命中识别模式（样例：" + unmatched + "）。"
+		}
+		hint += "写 内容进播放页链接/url_after 等字段时，请对照详情页样本里的分集 href 形态（如 /vodplay/id-x-y.html）推断，并以 play 步骤实测直链为准。"
+		samples = append(samples, ai.Sample{Label: "播放页提示", Content: hint})
 	}
 	return samples, nil
+}
+
+// scanUnmatchedPlayHref 从页面正文找带 play 字样但 playHints 不认的 href 样例（供诊断提示）。
+// 排除 #anchor 锚点（#con_playlist_1 之类 tab 切换不是播放页）。
+func scanUnmatchedPlayHref(body string) string {
+	for _, m := range hrefExtractPattern.FindAllStringSubmatch(body, 400) {
+		value := strings.TrimSpace(m[1])
+		if value == "" || strings.HasPrefix(value, "#") || playHints.MatchString(value) {
+			continue
+		}
+		if strings.Contains(strings.ToLower(value), "play") {
+			return clipString(value, 80)
+		}
+	}
+	return ""
+}
+
+// fetchPlay 真抓播放页并追加样本；播放页是关键证据，给 1.5 倍预算。返回是否成功抓到。
+func fetchPlay(ctx context.Context, fetcher *xbpq.Fetcher, address, referer string, samples *[]ai.Sample, limit int) bool {
+	if strings.TrimSpace(address) == "" {
+		return false
+	}
+	playBody, err := fetcher.Get(ctx, address, referer)
+	if err != nil || strings.TrimSpace(playBody) == "" {
+		return false
+	}
+	*samples = append(*samples, ai.Sample{Label: "播放页 " + address, Content: clipHTML(playBody, limit*3/2)})
+	return true
 }
 
 var (
 	// show 是很多站的「筛选页」而非分类页，放最后并在详情规则里排除。
 	categoryHints = regexp.MustCompile(`(?i)/(?:type|list|vodtype|fenlei|category|show)/[\w./-]*[0-9a-z]`)
 	// 详情页路径第二段必然是数字（/vod/55569.html、/detail/138557/）。
-	detailHints = regexp.MustCompile(`(?i)/(?:vod|detail|movie|drama)/[0-9][\w./-]*`)
-	// 播放页要能覆盖 /play/55388-1-1.html 与 /play/137736-1-1/ 两种收尾。
-	playHints = regexp.MustCompile(`(?i)/(?:play|video|bofang)/[\w./-]+`)
+	// vod 前缀可选：MacCMS 命名是 /voddetail/120200.html（zmwgy.net 式），
+	// 旧写法 /(?:vod|detail)/ 要求斜杠紧跟 vod，/voddetail/ 整段不匹配 → 详情环节断链。
+	detailHints = regexp.MustCompile(`(?i)/(?:vod)?(?:detail|vod|movie|drama)/[0-9][\w./-]*`)
+	// 播放页要能覆盖 /play/55388-1-1.html、/play/137736-1-1/ 与 MacCMS 的 /vodplay/120200-1-1.html。
+	playHints = regexp.MustCompile(`(?i)/(?:vod)?(?:play|bofang)/[\w./-]+|/video/[\w./-]+`)
 )
 
 func pickFirstHref(body string, pattern *regexp.Regexp) string {
