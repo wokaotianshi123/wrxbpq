@@ -89,7 +89,9 @@ func Probe(ctx context.Context, siteURL string, limit int) ([]ai.Sample, error) 
 	if detailAddress != "" {
 		if body, err := fetcher.Get(ctx, detailAddress, siteURL+"/"); err == nil {
 			detailBody = body
-			samples = append(samples, ai.Sample{Label: "详情页 " + detailAddress, Content: clipHTML(body, limit)})
+			// 详情页给 1.3 倍预算：分集/线路容器在页面中后部，24000 截断会把
+			// 第 2、3 条线路容器切掉，指纹多线路计数就错了。
+			samples = append(samples, ai.Sample{Label: "详情页 " + detailAddress, Content: clipHTML(body, int(float64(limit)*1.3))})
 		}
 	}
 	// 「详情url」模板样本：给出由真实详情页地址实测反推的 详情url 模板。
@@ -218,9 +220,15 @@ var (
 	// 详情页路径第二段必然是数字（/vod/55569.html、/detail/138557/）。
 	// vod 前缀可选：MacCMS 命名是 /voddetail/120200.html（zmwgy.net 式），
 	// 旧写法 /(?:vod|detail)/ 要求斜杠紧跟 vod，/voddetail/ 整段不匹配 → 详情环节断链。
-	detailHints = regexp.MustCompile(`(?i)/(?:vod)?(?:detail|vod|movie|drama)/[0-9][\w./-]*`)
+	// 末路 /[\w-]+/[0-9]{3,}\.html 补苹果CMS新版 mxone 皮肤（hanjuds.com 式）：
+	// 详情是 /{分类目录}/{数字}.html（如 /80s/156040.html），没有 vod/detail 关键词段，
+	// 原形态全部不匹配 → 分类页扒不到详情链接、Probe 停在分类页、指纹缺详情/播放样本。
+	detailHints = regexp.MustCompile(`(?i)/(?:vod)?(?:detail|vod|movie|drama)/[0-9][\w./-]*|/[\w-]+/[0-9]{3,}\.html`)
 	// 播放页要能覆盖 /play/55388-1-1.html、/play/137736-1-1/ 与 MacCMS 的 /vodplay/120200-1-1.html。
-	playHints = regexp.MustCompile(`(?i)/(?:vod)?(?:play|bofang)/[\w./-]+|/video/[\w./-]+`)
+	// 末路补 mxone 连字符命名 /{目录}/play-{id}-{线}-{集}.html（hanjuds.com 式）：
+	// 原形态要求 play/ 斜杠紧跟，play- 整段不匹配 → 详情页扒不到播放链接、play 环节断链。
+	// 注意要连目录段一起捕获（/[\w-]+/play-…），只捕 /play-… 会丢目录前缀、拼出 404。
+	playHints = regexp.MustCompile(`(?i)/(?:vod)?(?:play|bofang)/[\w./-]+|/video/[\w./-]+|/[\w-]+/[\w-]*play-[0-9][\w.-]*`)
 )
 
 func pickFirstHref(body string, pattern *regexp.Regexp) string {

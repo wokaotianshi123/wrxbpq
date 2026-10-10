@@ -289,9 +289,13 @@ func templateBlock(home, catalog, detail, origin, paging, category string) strin
 	// 皮肤与家族默认链是否吻合：不吻合时简写会踩空，须提示。
 	if skin != "" {
 		ok := map[string][]string{
-			"myui":   {"MacCMS", "MacCMS接口(JSON)", "路径式泛型", "通用高频"},
-			"stui":   {"MacCMS", "MacCMS接口(JSON)", "路径式泛型", "通用高频"},
+			"myui":     {"MacCMS", "MacCMS接口(JSON)", "路径式泛型", "通用高频"},
+			"stui":     {"MacCMS", "MacCMS接口(JSON)", "路径式泛型", "通用高频"},
 			"hl(海蓝)": {"MacCMS", "路径式泛型", "通用高频"},
+			// module(苹果新版) 皮肤对应 mxone 新家族；老 MacCMS/路径式家族的默认链以
+			// stui/myui 的 <ul class="stui-content__playlist"> 为主，截不到 mxone 的
+			// module-blocklist，所以命中这些家族要提示实测补写。
+			"module(苹果新版)": {"MacCMS新版mxone", "通用高频"},
 		}[skin]
 		compatible := ok == nil
 		for _, name := range ok {
@@ -513,6 +517,32 @@ func catalogBlock(body string) string {
 		return ""
 	}
 	var lines []string
+	// 苹果CMS mxone 皮肤（hanjuds.com 式）目录：条目是 <div class="module-item">，
+	// 没有 <li> 盒子——通用 <li> 边界会锚到导航列表、数组+链接实测全 ✗。
+	// 命中皮肤签名（module-item 出现 ≥6 且 module-item-cover 同现）走固定建议。
+	if occurrences(body, `class="module-item"`) >= 6 && occurrences(body, `module-item-cover`) >= 3 {
+		arr := `class="module-item"><div class="module-item-cover"&&</div></div>`
+		entries := xbpq.List(body, arr)
+		links := 0
+		sample := ""
+		for _, entry := range entries {
+			value := strings.TrimSpace(xbpq.CutOnce(entry, `href="&&"`))
+			if strings.HasPrefix(value, "/") && len(value) > 1 && strings.Contains(value, ".html") {
+				links++
+				if sample == "" {
+					sample = value
+				}
+			}
+		}
+		lines = append(lines, fmt.Sprintf("目录条目皮肤：苹果CMS mxone（div class=\"module-item\"，非 <li>）——实测 %q 截出 %d 段、%d 段含详情链接（示例 %s）。",
+			clipToken(arr, 60), len(entries), links, clipToken(sample, 60)))
+		lines = append(lines, "  → 数组 建议逐字照抄上方锚点；标题 \"title=\\\"&&\\\"\"（封面 <a title> 即片名），链接 \"href=\\\"&&\\\"\"，图片 \"data-src=\\\"&&\\\"\"（懒加载真实地址在 data-src，src= 是占位图）。")
+		if links >= 3 {
+			return strings.Join(lines, "\n")
+		}
+		// 实测不达标（页面形态与标准 mxone 有出入），落回通用逻辑。
+		lines = nil
+	}
 	// 条目边界：挑出现次数足够的重复标签
 	itemStart, itemEnd := "", ""
 	for _, pair := range [][2]string{{"<li", "</li>"}, {"<dd", "</dd>"}, {"<a", "</a>"}} {
@@ -813,9 +843,9 @@ func findAllRanges(body, token string) [][2]int {
 // 或播放脚本 play.php（vodplay.php 内含 play.php?，一并命中）。
 // 早期只认 /play/ 会漏掉 MacCMS 的 /vodplay/1-1-1.html 连写形态，导致这类站
 // 整个详情页分集识别为空、多线路无从判起。
-// 播放页链接形态：/play/、/bpplay/、/vodplay/、/playhtml/、/dplay/、play.php?
-// （各站前缀不同，漏掉某一种会让该站的多线路检测与分集校验全部失效。）
-var playHrefPattern = regexp.MustCompile(`href="[^"]*?(?:/play/|/bpplay/|/vodplay/|/playhtml/|/dplay/|play\.php\?)[^"]*"`)
+// 苹果CMS mxone 皮肤（hanjuds.com 式）命名是 /{目录}/play-{id}-{线}-{集}.html，
+// play 与数字之间是 - 不是 /，故末路补 play-[0-9] 连字符形态。
+var playHrefPattern = regexp.MustCompile(`href="[^"]*?(?:/play/|/bpplay/|/vodplay/|/playhtml/|/dplay/|play\.php\?|/[\w-]+/play-[0-9])[^"]*"`)
 
 // hlTabPattern hl(海蓝)皮肤线路按钮：class 含 hl-tabs-btn，一排按钮对应多个分集面板。
 var hlTabPattern = regexp.MustCompile(`(?i)<a[^>]*class="[^"]*hl-tabs-btn[^"]*"[^>]*>`)
@@ -1126,6 +1156,24 @@ func detailBlock(body string) string {
 	if body == "" {
 		return ""
 	}
+	// 苹果CMS mxone 皮肤（hanjuds.com 式）：分集在 <div class="module-blocklist">、
+	// 线路容器 <div class="module-list module-player-list tab-list sort-list">。
+	// 通用投票逻辑会被「相关推荐」里的 /play- 链接带偏（相关推荐 video-name 也挂
+	// /{dir}/play-{其它id}-1-1.html，与真分集同形），把演员表 <ul> 误当选票冠军。
+	// 命中皮肤签名时走固定建议，跳过投票。
+	if strings.Contains(body, `module-blocklist`) && strings.Contains(body, `module-player-list tab-list`) {
+		var lines []string
+		if playAt := playHrefPattern.FindStringIndex(body); playAt != nil {
+			lines = append(lines, fmt.Sprintf("分集链接形态（mxone /play- 连字符命名）示例：%s", clipToken(body[playAt[0]:playAt[1]], 90)))
+		}
+		lines = append(lines, "  → 播放数组 建议 \"class=\\\"module-list module-player-list tab-list sort-list&&</div>\"——起始锚点取该 div 开始标签去尾 > 的前缀（各行 id=glist-xxx 不同、不能用 id 做锚；class 前缀逐条一致），结束 </div>；这是每条线路一个并列容器。")
+		lines = append(lines, "  → 线路数组 与 播放数组 【同锚点】\"class=\\\"module-list module-player-list tab-list sort-list&&</div>\"——引擎按容器段切分线路；锚 module-tab-item 按钮会让每条线路 0 集（按钮里只有线路名和小计数字，没有分集链接）。")
+		lines = append(lines, "  → 播放标题 建议 \"<span>&&</span>\"（mxone 分集 <a> 内是 <span>第01集</span>）；播放列表 用 \"</a>\" 分隔（分集是 <a> 连排、无 <li> 无 #，写 </li> 会把整段当 1 集）；播放链接 \"href=\\\"&&\\\"\"。")
+		routeCount := strings.Count(body, `module-player-list tab-list`)
+		lines = append(lines, fmt.Sprintf("  多线路：该详情页有 %d 条线路容器（module-player-list tab-list），【必须写 线路数组】。", routeCount))
+		lines = append(lines, "  ⚠ 相关推荐条目（video-name 里的 /play-{其它id}-1-1.html）不是本剧分集，写规则时锚点必须框在 module-blocklist/tab-list 容器内，不要按页面级 <a> 截分集。")
+		return strings.Join(lines, "\n")
+	}
 	matches, container, prefix, endTag, votes, fromUL := voteEpisodeContainer(body)
 	if len(matches) == 0 {
 		return ""
@@ -1264,6 +1312,14 @@ func playBlock(body string) string {
 		}
 	}
 	if media == "" {
+		// 苹果CMS mxone 皮肤（hanjuds.com 式）：真实 m3u8 用 base64 塞进 iframe src 的
+		// url= 参数（src="…/url?url=<base64>"），明文正则扫不到。引擎 PlayerURL 内置
+		// iframeBase64URL 解码兜底——这种站 跳转播放链接【省略不写】即可。
+		if direct := xbpq.IframeBase64URL(body); direct != "" {
+			lines = append(lines, "页面是 iframe+base64 取流（无明文直链）：解码示例 "+clipToken(direct, 140))
+			lines = append(lines, "  → 跳转播放链接 建议【整个字段省略不写】——引擎会自动解 iframe src 里的 base64 直链（实测比手写锚点稳，手写 \"url=&&\" 会截出 base64 密文或整段 query）。")
+			return strings.Join(lines, "\n")
+		}
 		lines = append(lines, "样本里没找到明文 m3u8/mp4 直链：可能是加密/iframe 二级页，跳转播放链接 需要先解 script 里的变量。")
 		return strings.Join(lines, "\n")
 	}
@@ -1298,6 +1354,8 @@ func playBlock(body string) string {
 
 var navPattern = regexp.MustCompile(`(?i)<a[^>]+href="[^"]*?/(?:type|list|vodtype|show|fenlei)/([0-9a-zA-Z-]+)/?[^"]*"[^>]*>([^<>]{1,12})</a>`)
 var formPattern = regexp.MustCompile(`(?i)<form[^>]+action="([^"]*(?:search|so|wd)[^"]*)"[^>]*>`)
+// wdInputFormPattern 苹果CMS mxone 皮肤：action 不含搜索关键词，但同页有 name="wd" 输入框。
+var wdInputFormPattern = regexp.MustCompile(`(?i)<form[^>]+action="([^"]+\.html)"[^>]*>[\s\S]{0,600}?<input[^>]+name="wd"`)
 
 func homeBlock(body, category string) string {
 	if body == "" {
@@ -1341,6 +1399,13 @@ func homeBlock(body, category string) string {
 	}
 	if form := formPattern.FindStringSubmatch(body); form != nil {
 		lines = append(lines, fmt.Sprintf("  → 搜索表单 action=%q：若含 ?wd= 直接替换成 {wd}；若是 /search/xxx/ 路径形态则拼 …/{wd}/…，务必与 action 原文逐字一致。", form[1]))
+	} else if wdForm := wdInputFormPattern.FindStringSubmatch(body); wdForm != nil {
+		// 苹果CMS mxone 皮肤（hanjuds.com 式）表单是 <form action="/80s/list--------------.html">
+		// + <input name="wd">，action 不含 search/so/wd 字样，原 formPattern 识别不到 →
+		// 指纹缺搜索行，AI 只能瞎猜（且这类站 GET 生效、POST 404，猜 POST 必挂）。
+		lines = append(lines, fmt.Sprintf("  → 搜索表单 action=%q（含 name=\"wd\" 输入框）：本站是 GET 搜索，"+
+			"搜索url 写 \"%s?wd={wd}\"——逐字保留 action 里的连字符占位串，不要改成 ?… 之外的形态，也不要写成 POST。",
+			wdForm[1], wdForm[1]))
 	}
 	return strings.Join(lines, "\n")
 }

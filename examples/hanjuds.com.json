@@ -1,0 +1,22 @@
+{
+  "主页url": "https://www.hanjuds.com",
+  "请求头": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+  "分类": "成全电影$1#成全剧集$2#理论$36#80s预告$4#成全韩剧$15#成全综艺$20",
+  "分类url": "https://www.hanjuds.com/80s/index-{cateId}-{catePg}.html",
+  "搜索url": "https://www.hanjuds.com/80s/list--------------.html?wd={wd}",
+  "详情url": "https://www.hanjuds.com/80s/{id}.html",
+  "数组": "class=\"module-item\"><div class=\"module-item-cover\"&&</div></div>",
+  "标题": "title=\"&&\"",
+  "图片": "data-src=\"&&\"",
+  "副标题": "class=\"module-item-text\">&&</div>",
+  "链接": "href=\"&&\"",
+  "搜索数组": "<div class=\"module-search-item\"&&<div class=\"video-info-main\">",
+  "搜索标题": "<h3>&&</h3>",
+  "搜索链接": "video-serial\" href=\"&&\"",
+  "搜索图片": "data-src=\"&&\"",
+  "线路数组": "class=\"module-list module-player-list tab-list sort-list&&</div>",
+  "播放数组": "class=\"module-list module-player-list tab-list sort-list&&</div>",
+  "播放列表": "</a>",
+  "播放标题": "<span>&&</span>",
+  "播放链接": "href=\"&&\""
+}

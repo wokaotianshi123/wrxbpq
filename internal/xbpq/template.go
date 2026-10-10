@@ -26,6 +26,39 @@ type templateFamily struct {
 
 var families = []templateFamily{
 	{
+		// 苹果CMS新版 mxone 皮肤（/template/mxone/，如 hanjuds.com、80s成全影视）：
+		// 分类形态是「目录 + index-{cateId}-{catePg}.html」（列表目录名与域名无关，故 match 只认 index- 段）；
+		// 详情 /{dir}/{数字}.html、播放 /{dir}/play-{id}-{线}-{集}.html、
+		// 列表条目 div class="module-item"、分集容器 div class="module-blocklist"（<a> 连排，无 <li>）、
+		// 多线路 div class="module-list module-player-list tab-list sort-list"（每条线路一个）。
+		// 关键差异（与 §1/§2 myui/stui 老皮肤全部不同）：
+		//   ① 线路容器与分集容器同锚点——线路数组必须锚 tab-list（截出的每段=该线路分集框），
+		//      锚 module-tab-item 按钮会让每条线路 0 集；
+		//   ② 分集是 <a> 连排、段内无 #，播放列表分隔符写 </a>（不是 <li>/不是 #）；
+		//   ③ 取流是 iframe+base64 二级页（src="…/url?url=<base64 m3u8>"），引擎 PlayerURL 内置解码，
+		//      跳转播放链接【省略不写】；
+		//   ④ 搜索 GET：{host}/…list------…-.html?wd={wd}。
+		// 放在 MacCMS 之前：专用 → 通用，先命中字段优先。
+		name:  "MacCMS新版mxone",
+		match: regexp.MustCompile(`(?i)/index-(?:\{cateId\}|[0-9])[^/"?]*\.html`),
+		fields: map[string]string{
+			"数组":   `class="module-item"><div class="module-item-cover"&&</div></div>||<div class="module-item"&&</div></div>`,
+			"标题":   `title="&&"`,
+			"副标题":  `class="module-item-text">&&</div>`,
+			"图片":   `data-src="&&"||data-original="&&"`,
+			"链接":   `href="&&"`,
+			"播放数组": `class="module-list module-player-list tab-list sort-list&&</div>`,
+			"线路数组": `class="module-list module-player-list tab-list sort-list&&</div>`,
+			"播放列表": `</a>`,
+			"播放标题": `<span>&&</span>`,
+			"播放链接": `href="&&"`,
+			"搜索数组":   `<div class="module-search-item"&&<div class="video-info-main">`,
+			"搜索标题":   `<h3>&&</h3>`,
+			"搜索链接":   `video-serial" href="&&"`,
+			"搜索图片":   `data-src="&&"`,
+		},
+	},
+	{
 		// MacCMS 自带 API（/api.php/provide/vod/，?ac=videolist|list）：列表层是 JSON。
 		// 模板库 §五：接口站列表用 j: 模式，详情/播放仍走 HTML 详情页（下方默认链已带）。
 		name:  "MacCMS接口(JSON)",

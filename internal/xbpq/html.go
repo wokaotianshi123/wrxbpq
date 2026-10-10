@@ -188,6 +188,37 @@ func PlayerURL(body string) string {
 	if urlValue := fields["url"]; urlValue != "" {
 		return DecryptPlayerURL(urlValue, fields["encrypt"])
 	}
+	if address := IframeBase64URL(body); address != "" {
+		return address
+	}
+	return ""
+}
+
+// iframeBase64URL 处理 iframe 播放页把真实直链用 base64 塞进 query 的形态
+// （苹果CMS mxone 等新版皮肤：src=".../url?url=<base64>"，解码后逗号分隔多源）。
+var iframeBase64Pattern = regexp.MustCompile(`(?is)<iframe[^>]*?[?&]url=([A-Za-z0-9+/]{20,}={0,2})`)
+
+// IframeBase64URL 从 iframe src 的 base64 参数解出真实直链（供引擎取流与指纹提示共用）。
+func IframeBase64URL(body string) string {
+	matches := iframeBase64Pattern.FindStringSubmatch(body)
+	if len(matches) < 2 {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(matches[1])
+	if err != nil {
+		if padded := matches[1] + strings.Repeat("=", (4-len(matches[1])%4)%4); padded != matches[1] {
+			decoded, err = base64.StdEncoding.DecodeString(padded)
+		}
+		if err != nil {
+			return ""
+		}
+	}
+	for _, candidate := range strings.Split(string(decoded), ",") {
+		candidate = strings.TrimSpace(candidate)
+		if strings.HasPrefix(strings.ToLower(candidate), "http") {
+			return candidate
+		}
+	}
 	return ""
 }
 
