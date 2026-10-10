@@ -88,6 +88,21 @@ input[type=text], input[type=password], textarea {
 }
 input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
+select {
+  background: var(--code);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  margin-left: 6px;
+  cursor: pointer;
+}
+select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+select:disabled { opacity: .5; cursor: not-allowed; }
+.row label.inline select { vertical-align: middle; }
+
 #site { flex: 1; min-width: 260px; }
 textarea {
   min-height: 260px;

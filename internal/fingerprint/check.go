@@ -27,11 +27,14 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 		issues = append(issues, CheckIssue{Field: field, Problem: problem})
 	}
 
-	// 简写三条铁律（实测踩坑，确定性拦截）：
+	// 简写三条铁律（实测踩坑 + 项目规定，确定性拦截）：
 	// ① 省了 主页url 时 分类url 必须含域名——相对路径 jar 定位不到站点，直接识别失败；
 	// ② 分类url 必须写分页占位 {catePg}——否则第 2 页和第 1 页是同一个 URL，paging 验证必挂；
 	// ③ 分类url 必须写分类占位 {cateId}——声明 ≥2 个分类时，缺了它所有分类都打开同一页，
 	//    catalog 切分类必串档（单分类站 ID 不体现在 URL 形态属合法例外，不报）。
+	// 详情url 不再强制必写（10-10 取消该设定）：简写版可省略、靠模板/列表链接还原兜底，
+	// 完整版由 prompt 要求显式写出；一旦写了 详情url，形态照样本「详情url 模板」实测模板，
+	// 是否可用以 detail 步骤实测为准。自检不再拦截缺失 详情url。
 	category := rule.Field("分类url", "分类Url")
 	if rule.DeclaresField("分类url") || category != "" {
 		if !strings.Contains(category, "{catePg}") {
@@ -91,6 +94,68 @@ func Check(ruleText string, samples []ai.Sample) []CheckIssue {
 	// 整个播放容器会被当成 1 集（实测：5 条线路×4 集的站只剩 1 集）。
 	if list := rule.Field("播放列表"); strings.Contains(list, "&&") {
 		add("播放列表", fmt.Sprintf("播放列表 是【分集分隔符】不是截取串，不能写成 前缀&&后缀——引擎按它做 Split，页面上找不到 %q 这个字面量，整个播放容器会被当成 1 集。改成样本里真实存在的分隔串：分集是 <li> 结构就写 </li>（用闭合标签；开标签常带属性或空格如 `<li >`，匹配不稳）；分集之间本就有 # 之类符号就写那个符号", list))
+	}
+
+	// 详情层字段锚点逐字校验（简介/封面/类型/导演/主演/副标题/影片名称/线路标题）。
+	// 55ys9 教训：AI 从 <meta description> 里抄了 "剧情:" 当正文锚点——所有样本里"找不到"是假象，
+	// 它在 head 的 meta 里出现，但 简介 的 &&</p> 会从 meta 一路吞到正文 </p>，
+	// 把 var maccms 脚本整段带进简介。锚点命中位置在 <body> 之前 = meta 陷阱，直接报。
+	for _, name := range []string{"简介", "封面", "类型", "导演", "主演", "副标题", "影片名称", "线路标题"} {
+		pattern := rule.Field(name)
+		if pattern == "" || !rule.DeclaresField(name) || strings.HasPrefix(pattern, "p:") || strings.HasPrefix(pattern, "jsoup:") || strings.HasPrefix(pattern, "j:") {
+			continue
+		}
+		start := strings.TrimSpace(strings.SplitN(strings.SplitN(pattern, "&&", 2)[0], "||", 2)[0])
+		if len([]rune(start)) < 3 {
+			continue
+		}
+		total := occurrencesInAll(samples, start)
+		if total == 0 {
+			add(name, "起始锚点 \""+clipToken(start, 48)+"\" 在页面样本里一字未现——pattern 必须逐字复制样本原文；尤其禁止从 <meta>/<title> 标签里抄词当正文锚点（meta 里的\"剧情:\"之类不代表正文有它）")
+			continue
+		}
+		if headOnlyHit(start, samples) {
+			add(name, "起始锚点 \""+clipToken(start, 48)+"\" 只出现在 <head> 的 meta/title 里，正文（<body> 之后）一次都没有——从 meta 抄的锚点配 宽结尾（&&</p>）会从 meta 一路吞进正文甚至 var maccms 脚本。回详情页正文里找真实简介区（如 \"简介：</span>&&<a\"、\"col-pd\">&&</p> 这类正文锚点），以 detail 实测简介干净为准")
+		}
+	}
+
+	// 55ys9 教训（真机只出一集）：规则没写 播放列表 时真 jar 默认按 # 切分集，
+	// stui 分集是 <li> 连排、段内没有 #——jar 把整段当 1 集，只显示第一条。
+	// 我们 Rule.Field 有模板默认（<a/<li）会掩盖这个问题，所以必须按 jar 语义模拟：
+	// 规则没显式写 播放列表 就用 # 实测；每线路段真有多条分集但 # 切出来只剩 1 条 → 报。
+	detailBody := pick(samples, "详情页")
+	if detailBody != "" && rule.Field("播放数组") != "" {
+		jarSplit := "#"
+		if declaredList := rule.DeclaredFields()["播放列表"]; declaredList != "" && !strings.Contains(declaredList, "&&") {
+			jarSplit = declaredList
+		}
+		container := rule.Field("线路数组")
+		if container == "" {
+			container = rule.Field("播放数组")
+		}
+		if !strings.HasPrefix(container, "j:") && !strings.HasPrefix(container, "p:") {
+			if segments := xbpq.List(detailBody, container); len(segments) > 0 {
+				worstReal, worstSplit := 0, 0
+				for _, segment := range segments {
+					realCount := strings.Count(segment, `href="`) + strings.Count(segment, "href='")
+					if realCount == 0 {
+						continue
+					}
+					splitCount := len(strings.Split(segment, jarSplit))
+					if realCount > worstReal {
+						worstReal, worstSplit = realCount, splitCount
+					}
+				}
+				if worstReal >= 2 && worstSplit < worstReal {
+					declared := rule.DeclaresField("播放列表")
+					hint := "规则没写 播放列表——真 jar 默认按 # 切分集，本组分集段里没有 #，jar 会把整段当 1 集（实测：分集链接 %d 条但只切出 %d 段）。必须显式写 播放列表：分集是 <li> 结构写 </li>（开标签常带空格 <li >，匹配不稳）"
+					if declared {
+						hint = "播放列表 分隔符切不开本站分集：分集链接 %d 条但只切出 %d 段，真机上每线路只剩少数集。改成详情页分集条目之间真实存在的分隔串（<li> 结构写 </li>）"
+					}
+					add("播放列表", fmt.Sprintf(hint+"；写完以 detail 步骤实测集数=页面条目数为准", worstReal, worstSplit))
+				}
+			}
+		}
 	}
 
 	// 多线路识别（与指纹四路证据一致）：
@@ -244,6 +309,34 @@ func occurrencesInAll(samples []ai.Sample, token string) int {
 		total += strings.Count(sample.Content, token)
 	}
 	return total
+}
+
+// headOnlyHit 判断锚点是否只活在 <head>（meta/title 区）、<body> 之后一次都没有——
+// 用于拦截"从 <meta description> 抄词当正文锚点"（55ys9 的 剧情: 就是这种）。
+// 规则：任一样本在 <body> 之后出现该锚点 → false（正文有，正常）；
+// 全部出现都在 <body> 之前（且确实有 <body> 标记可判位）→ true（只在 head，meta 陷阱）。
+// 找不到 <body> 标记时无法判位，保守返回 false（不误报）。
+func headOnlyHit(token string, samples []ai.Sample) bool {
+	anyHeadHit, anyBodyHit := false, false
+	for _, sample := range samples {
+		body := sample.Content
+		bodyIdx := indexCaseInsensitive(body, "<body")
+		if bodyIdx < 0 {
+			continue
+		}
+		if idx := strings.Index(body[:bodyIdx], token); idx >= 0 {
+			anyHeadHit = true
+		}
+		if strings.Contains(body[bodyIdx:], token) {
+			anyBodyHit = true
+		}
+	}
+	return anyHeadHit && !anyBodyHit
+}
+
+func indexCaseInsensitive(haystack, needle string) int {
+	lower := strings.ToLower(haystack)
+	return strings.Index(lower, strings.ToLower(needle))
 }
 
 // episodeCountIn 按规则自身的 播放列表（分隔符）+ 播放链接 实测一段里能提出几条分集，

@@ -2,6 +2,66 @@ package ai
 
 import "strings"
 
+// 规则生成的两种版本：
+//   - RuleVersionSimple（简写版，默认）：命中内置模板家族且皮肤吻合的字段直接省略，交给模板兜底，只写必须字段。
+//   - RuleVersionFull（完整版）：不依赖模板兜底，把该站采集链路用到的字段全部按样本真实 HTML 显式写全，
+//     产出的规则脱离内置模板也能独立运行。
+const (
+	RuleVersionSimple = "simple"
+	RuleVersionFull   = "full"
+)
+
+// NormalizeRuleVersion 把外部（前端/CLI）传来的版本串归一到 RuleVersionSimple / RuleVersionFull。
+// 空值、无法识别的值一律回落到简写版（与历史默认行为一致）。
+func NormalizeRuleVersion(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "full", "完整版", "完整", "完整规则", "quan", "quanbu":
+		return RuleVersionFull
+	default:
+		return RuleVersionSimple
+	}
+}
+
+// ruleVersionLabel 返回给人类看的版本名。
+func ruleVersionLabel(version string) string {
+	if NormalizeRuleVersion(version) == RuleVersionFull {
+		return "完整版"
+	}
+	return "简写版"
+}
+
+// ruleVersionGenerateDirective 生成阶段注入的版本指令（完整版与简写版互斥）。
+func ruleVersionGenerateDirective(version string) string {
+	if NormalizeRuleVersion(version) == RuleVersionFull {
+		return "【本次输出：完整版——不靠模板兜底，字段全部显式写全】\n" +
+			"1. 与简写版相反：禁止因为「模板能兜底」就省略字段。指纹「可省略字段清单」里列出的那些字段（数组/标题/链接/图片/副标题/简介/播放数组/播放标题/播放链接/跳转播放链接/搜索url 等），" +
+			"本版本要【逐个按样本或指纹里的真实 HTML 显式写出来】（第 6 条列出的「写了必坏」例外除外），让规则即使换到没有内置模板的 jar 上也能独立工作。\n" +
+			"2. 完整版只是「不省略」，不是「可以照抄模板默认值」：每条 pattern 仍必须是样本 HTML / 指纹里逐字真实存在的字符串，" +
+			"模板默认与该站皮肤不符时，按该站真实 HTML 改写，绝不硬套模板默认。\n" +
+			"3. 主页url 在完整版里【必须写】（简写版可省，完整版把站点根地址明确写进去）。\n" +
+			"4. 三条实测铁律（{catePg}、{cateId}、分类 ID）与「pattern 来自真实 HTML」的要求，完整版只高不低，一律照上文执行；" +
+			"详情url 不是硬性必写，但完整版按「字段全部显式写全」本就应把它写出来（形态照样本「详情url 模板」的实测模板抄）。\n" +
+			"5. 皮肤不符 / 未命中模板的字段本就是简写版也要写的，完整版同样写；不要为了省事把某字段留空或省略。\n" +
+			"6. 【例外】「写了必坏」的字段两版都别写：player_aaaa 站不写 跳转播放链接（见陷阱10）、单线路站不写 线路数组（见陷阱7）、" +
+			"站点根本没有的形态（无筛选就不写 {year}/{area} 之类）不为凑字数硬造——完整版写的是【该站真实存在】的字段，不是全字典。\n"
+	}
+	return "【本次输出：简写版——命中模板的字段可省略，交给引擎兜底】\n" +
+		"按上文「简写机制」：命中内置模板家族且皮肤吻合的字段直接省略，只写必须字段（分类url、分类、" +
+		"搜索url（模板没给时），以及与皮肤不符 / 模板截不到的字段）。\n" +
+		"⚠ 简写版也必须写 播放列表：真机 jar 没它默认按 # 切分集，stui/MacCMS 的 <li> 连排分集段内无 # → " +
+		"真机只剩 1 集（见陷阱 12），模板默认只对本地引擎有效，别省。\n"
+}
+
+// ruleVersionFixRequirement 修复阶段针对版本的差异化要求（返回一条编号要求文本，不含编号）。
+func ruleVersionFixRequirement(version string) string {
+	if NormalizeRuleVersion(version) == RuleVersionFull {
+		return "（本轮是完整版）保持【所有字段都显式写全】：修好的字段继续逐字写出，模板能兜底的字段也不要删回省略——完整版不允许退化成简写；" +
+			"缺哪个字段（含主页url）就按样本真实 HTML 补哪个，pattern 一律来自样本 / 指纹，禁止用模板默认值充数。\n"
+	}
+	return "（本轮是简写版）简写过度导致某字段截不到（模板默认与样本皮肤不符）：只把坏的那个字段按样本 HTML 逐字补写，" +
+		"其它可省字段继续省——不要退化成全字段堆砌。\n"
+}
+
 // SystemPrompt 是规则生成的系统指令。
 const SystemPrompt = `你是一名 TVBox/XBPQ 爬虫规则编写专家。任务：根据用户提供的视频站点 HTML 样本，产出一份可直接使用的 XBPQ 规则 JSON。
 
@@ -17,7 +77,7 @@ XBPQ jar 与本引擎都内置模板：按「分类url」形态识别站点家�
 实测 61% 的真实规则不写 主页url，55% 只写「分类url + 分类」两个字段就正常工作。
 因此写规则的正确姿势是【按网页实际源框架决定写与不写】，而不是全字段堆砌：
 1. 指纹块给出「命中内置模板家族」与「可省略字段清单」：清单里且样本 HTML 与皮肤吻合的字段——省略不写，交给模板兜底。
-2. 必须写的字段：分类url、分类、搜索url（模板没给或站形态不同时）、详情url（列表链接非完整 URL 时）；
+2. 必须写的字段：分类url、分类、搜索url（模板没给或站形态不同时）；
    以及样本 HTML 与模板默认链对不上的字段——那些必须按样本逐字实测写。
 3. 【简写三条铁律，违反必翻车】：
    a) 省略 主页url 时，分类url 必须写含域名的绝对地址（https://站点域名/…）——相对路径 jar 定位不到站点，直接识别失败。
@@ -34,6 +94,10 @@ XBPQ jar 与本引擎都内置模板：按「分类url」形态识别站点家�
       「{cateId} 位置（实测）」标了分类 ID 在 URL 哪一段 → 分类url 里 {cateId} 就放在那一段，禁止挪到别处；
       没有实测结论（样本不足/导航扒不齐）→ 按首页导航逐字抄，并以验证 catalog 能否出条目把关，
       分类 ID 对不对只有"拼进分类url 真抓一次、看页面有没有条目"才能判定，不能从导航扒个数字就叫它照抄。
+   （详情url 不作硬性必写【10-10 取消旧规定】：简写版可省略，交给模板/列表链接还原兜底；
+   完整版按「字段全部显式写全」应写它。无论哪版，一旦写了 详情url，形态逐字照抄样本
+   「详情url 模板」给出的实测模板（服务端由真实详情页地址反推、回填比对逐字一致）；
+   没有该样本才从条目链接里找数字 ID 段换成 {id}，并以 detail 步骤实测能打开把关。）
 4. 皮肤不符（指纹提示"未识别到标准皮肤"或"⚠ 皮肤与模板链不吻合"）：不要简写，核心字段全部按样本写。
 5. 多线路站的 线路数组、player_aaaa 站的 跳转播放链接 省略策略见下方陷阱清单，它们优先于简写规则。
 简写不对时的递进修法（排错步骤）：①只留 分类url+分类 起步；②无数据→补 分类/数组/标题/链接/图片；
@@ -49,7 +113,7 @@ XBPQ jar 与本引擎都内置模板：按「分类url」形态识别站点家�
              筛选占位符 {area} {class} {year} {by} 写进模板即自动开启筛选；
              {lang} {letter} 支持差，【不要写】（写了筛选会坏）
 - 搜索url    搜索页模板，占位符 {wd}；jar/模板多数能自动获取，形态标准时可省；POST 形态：网址;post;键1=值1&键2=值2
-- 详情url    详情页模板，占位符 {id}；不写则用列表链接还原
+- 详情url    详情页模板，占位符 {id}；简写版可省（模板/列表链接还原兜底），完整版应写；写了就照「详情url 模板」样本的实测模板逐字抄
 - 数组       列表条目外层截取，如 "<li class=\"stui-vodlist__item\">&&</li>"
 - 二次截取   先把主体区域截出来再找条目，避免导航栏同名标签干扰
 - 标题       条目标题截取
@@ -66,6 +130,8 @@ XBPQ jar 与本引擎都内置模板：按「分类url」形态识别站点家�
 - 播放列表   分集【分隔符】（引擎按它 strings.Split 切开每条分集），默认 #
   ⚠ 它不是截取串，【禁止写成 前缀&&后缀】——页面上找不到该字面量就切不开，
   整个容器会被当成 1 集（实测 5 线路×4 集的站会只剩 1 集）。
+  ⚠ 也【不要省略不写】：本引擎虽有模板默认，但真机 jar 默认按 # 切；stui/MacCMS 分集 <li> 连排、
+  段内没有 # 时 jar 把整段当 1 集——真机上详情页只显示一集（55ys9 实测教训）。简写版也要显式写它。
   正确写法：分集是 <li> 结构 → 写 </li>（用闭合标签；开标签常带属性或空格，匹配不稳）；
   分集之间本就有 # / $ 之类符号 → 直接写那个符号。
 - 播放标题 / 播放链接   分集条目的标题与链接截取
@@ -128,11 +194,22 @@ XBPQ jar 与本引擎都内置模板：按「分类url」形态识别站点家�
       线路标题=">&&</a>" 或 data-value，可加 [替换:线路1>>腾腾#播放>>空][排序:…]。
    c) JSON 接口：线路数组="j:data.seriesInfo" 之类的路径。
    指纹报告 ≥2 条线路却只写了 播放数组：分集数会变成所有线路之和、且无法切换线路——这是错误。
+12.【真机分集塌缩坑（55ys9 实测教训）】播放列表 不能省：真机 jar 没写它时默认按 # 切分集，
+   而 stui/MacCMS 的分集是 <li> 单行连排、段内根本没有 # ——jar 把整个播放容器当 1 集，
+   真机详情页只显示第一条（本引擎有模板默认会掩盖这个问题，"我们测着对"≠真机对）。
+   stui/myui 分集 <li> 结构 → 显式写 "播放列表":"</li>"。
+13.【简介抄 meta 坑（55ys9 实测教训）】<meta name="description" content="…剧情:…"> 里的词
+   （"剧情:" 等）不代表正文里有它。从 meta 抄锚点配 宽结尾（&&</p>）会从 meta 一路吞到正文，
+   简介里混进标题、甚至 var maccms 脚本整段。简介 锚点必须取详情页【正文】里真实出现的边界
+   （如 "简介："、<p class="col-pd"> 一类），并在 detail 实测里确认简介文本干净。
 
 # 工作流程
 0. 若消息里给出【站点指纹】：它是服务端从真实页面解析并核实过出现次数的锚点，
    pattern 一律逐字符照抄指纹（含空格引号），只有指纹没覆盖的字段才回样本里逐字复制。
-1. 先看「模板与简写」块：命中家族且皮肤吻合 → 只写必须字段，其余按可省略清单省略；
+0a. 用户消息开头会指定【本次输出：简写版 / 完整版】：简写版按上面「简写机制」省略靠模板兜底的字段；
+   完整版不省略——指纹「可省略清单」里的字段也逐个显式写出（pattern 仍必须来自真实 HTML，
+   且"写了必坏"的例外照旧：player_aaaa 站不写 跳转播放链接、单线路站不写 线路数组）。
+1. 先看「模板与简写」块：命中家族且皮肤吻合 → 只写必须字段，其余按可省略清单省略（完整版除外）；
    未命中/皮肤不符 → 全字段按样本写。
 2. 分类字段与 {cateId} 位置以指纹「分类检测」实测结论为准（简写铁律 c）：已实测分类串逐字取用，
    实测失败分类不写入；没有实测结论才从首页导航逐字抄 ID，并以验证 catalog 出条目把关。
@@ -145,11 +222,14 @@ XBPQ jar 与本引擎都内置模板：按「分类url」形态识别站点家�
 // BuildGenerateMessages 构造生成规则的消息。
 // samples 是若干「标题 + 内容」的页面样本；notes 是用户补充说明（可空）；
 // siteFingerprint 是服务端核实过的锚点指纹（可空），有它时以指纹为准。
+// version 选择输出「简写版」(RuleVersionSimple) 还是「完整版」(RuleVersionFull)——
+// 简写版命中模板的字段可省略靠兜底；完整版所有字段按样本真实 HTML 显式写全。
 // 注意：samples 里的「分页实测」「分类检测」样本是服务端真实抓取验证后的结论，
 // 优先级最高——分类url 的页码形态与 分类 字段的 ID 都必须照它们写。
-func BuildGenerateMessages(siteURL string, samples []Sample, notes, siteFingerprint string) []Message {
+func BuildGenerateMessages(siteURL string, samples []Sample, notes, siteFingerprint, version string) []Message {
 	var builder strings.Builder
 	builder.WriteString("目标站点：" + siteURL + "\n\n")
+	builder.WriteString(ruleVersionGenerateDirective(version) + "\n")
 	if note := strings.TrimSpace(notes); note != "" {
 		builder.WriteString("用户补充说明（请优先采纳，可能包含站点特性、期望字段等）：\n" + note + "\n\n")
 	}
@@ -157,10 +237,18 @@ func BuildGenerateMessages(siteURL string, samples []Sample, notes, siteFingerpr
 	builder.WriteString("它给出实测通过的 分类url 模板（页码数字处换成 {catePg}）。分类url 的页码形态一律以它为准照抄，禁止按静态长相另猜形态。\n")
 	builder.WriteString("分类url 必须【同时】含 {cateId} 与 {catePg} 两个占位——缺 {catePg} 翻页必挂，缺 {cateId} 多分类切档必挂，自检会逐项拦截。\n")
 	builder.WriteString("样本里的「分类检测」条目是服务端【逐个真实抓取导航分类链接 → 看页面能否提出条目 → 比对不同 ID 页面是否相同】后的结论：\n")
-	builder.WriteString("「已实测分类串」逐字写进 分类 字段，「实测失败分类」不得写入，{cateId} 按它标的位置放进 分类url——分类 ID 真假以它为准，禁止拿导航扒的数字直接照抄。\n\n")
+	builder.WriteString("「已实测分类串」逐字写进 分类 字段，「实测失败分类」不得写入，{cateId} 按它标的位置放进 分类url——分类 ID 真假以它为准，禁止拿导航扒的数字直接照抄。\n")
+	builder.WriteString("样本里的「详情url 模板」条目给出了 详情url 的实测模板（服务端由真实详情页地址反推、回填比对逐字一致）：\n")
+	builder.WriteString("详情url 不是硬性必写字段——简写版可省略交给兜底；但一旦写它（完整版应写），形态必须逐字照抄该实测模板（{id} 占位），禁止改形态。\n\n")
 	if fp := strings.TrimSpace(siteFingerprint); fp != "" {
 		builder.WriteString(fp + "\n\n")
-		builder.WriteString("请优先按上面的站点指纹写 pattern，样本仅作指纹未覆盖字段的补充参考；指纹标了可省略且与皮肤吻合的字段直接省略，交给引擎模板兜底。\n")
+		if NormalizeRuleVersion(version) == RuleVersionFull {
+			builder.WriteString("请优先按上面的站点指纹写 pattern，样本仅作指纹未覆盖字段的补充参考。" +
+				"本轮是【完整版】：指纹里标「可省略」的字段也要按指纹/样本的真实 HTML 显式写出（省略清单仅作「这些字段模板本来会兜底」的说明，本版不靠兜底），" +
+				"但逐字形态一律以指纹实测锚点为准，指纹没覆盖的字段回样本复制。\n")
+		} else {
+			builder.WriteString("请优先按上面的站点指纹写 pattern，样本仅作指纹未覆盖字段的补充参考；指纹标了可省略且与皮肤吻合的字段直接省略，交给引擎模板兜底。\n")
+		}
 	} else {
 		builder.WriteString("以下是该站点的页面 HTML 样本（已裁剪）。请据此产出 XBPQ 规则 JSON。\n")
 	}
@@ -179,9 +267,11 @@ func BuildGenerateMessages(siteURL string, samples []Sample, notes, siteFingerpr
 // BuildFixMessages 构造修复规则的消息：把验证失败信息和相关样本回传给模型。
 // notes 是用户补充说明（可空），会作为额外修复线索交给模型；
 // siteFingerprint 非空时作为锚点权威来源，防止修复时再次抄错 HTML。
-func BuildFixMessages(siteURL, ruleJSON string, problems []string, samples []Sample, notes, siteFingerprint string) []Message {
+// version 沿用生成时的版本选择：简写版修复只补坏字段继续省，完整版修复保持字段全写不退化。
+func BuildFixMessages(siteURL, ruleJSON string, problems []string, samples []Sample, notes, siteFingerprint, version string) []Message {
 	var builder strings.Builder
 	builder.WriteString("目标站点：" + siteURL + "\n\n")
+	builder.WriteString("本轮版本：【" + ruleVersionLabel(version) + "】（简写版=可省略字段靠模板兜底；完整版=字段全部显式写全、不依赖模板）\n\n")
 	builder.WriteString("上一版规则：\n" + ruleJSON + "\n\n")
 	builder.WriteString("验证发现以下问题（必须逐条修掉，修不了说明原因）：\n")
 	for index, problem := range problems {
@@ -197,7 +287,7 @@ func BuildFixMessages(siteURL, ruleJSON string, problems []string, samples []Sam
 	builder.WriteString("\n修复要求：\n")
 	builder.WriteString("1. 对照上面「条目样本」检查 数组/二次截取 的边界是否把 链接/标题 要用的关键串截掉了；数组框住完整条目即可，具体值交给字段截取。\n")
 	builder.WriteString("2. 若问题出在 detail/play 步骤，对照「详情页样本」里分集容器的真实 HTML 重写 播放数组/播放列表/播放标题/播放链接；播放数组 起始锚点不要带闭合的 >（真实标签常带 style= 等额外属性）；stui/MacCMS 模板要用内层 ul（…playlist…&&</ul>），别用外层 div&&</div>。单线路站不要写 线路数组；指纹确认多线路时 线路数组 与 播放数组 同锚点即可。若指纹提示 player_aaaa 站，删掉 跳转播放链接 字段交给引擎兜底。\n")
-	builder.WriteString("3. 简写过度导致某字段截不到（模板默认与样本皮肤不符）：只把坏的那个字段按样本 HTML 逐字补写，其它可省字段继续省——不要退化成全字段堆砌。\n")
+	builder.WriteString("3. " + ruleVersionFixRequirement(version))
 	builder.WriteString("4. 若 paging（翻页）失败或第 2 页与第 1 页相同：多半是 分类url 漏写分页占位 {catePg}——补上它；若切分类后各分类目录内容相同（串档）：多半是 分类url 漏写 {cateId}——按指纹「分类检测」标的位置补上它（{cateId} 与 {catePg} 必须同时存在）。若是 catalog/detail 直接失败且规则省了 主页url：把 分类url 改成含域名的绝对地址 https://站点域名/…。\n")
 	builder.WriteString("5. 只改有问题的字段，其它字段保持原样，输出修正后的完整规则。\n")
 	builder.WriteString("6. 只输出 JSON，不要解释。\n")

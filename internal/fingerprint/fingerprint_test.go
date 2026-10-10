@@ -128,6 +128,7 @@ func TestCheckGoodRule(t *testing.T) {
 "播放列表": "<li>",
 "播放标题": ">&&</a>",
 "播放链接": "href=\"&&\"",
+"详情url": "https://www.ffv1.com/detail/{id}/",
 "跳转播放链接": "url: '&&'"
 }`
 	issues := Check(good, samples)
@@ -197,7 +198,7 @@ func TestAnalyzeMacCMSStyleSite(t *testing.T) {
 		}
 	}
 	// 该站的正确规则（含 线路数组==播放数组）不得被 Check 误报
-	good := `{"主页url":"https://www.6789ysw.com/","数组":"<li class=\"col-md-6 col-sm-4 col-xs-3\"&&</li>","二次截取":"<div class=\"col-lg-wide-75 col-xs-1 padding-0\"&&","标题":"title=\"&&\"","链接":"href=\"&&\"","列表图片":"data-original=\"&&\"","播放数组":"<ul class=\"stui-content__playlist clearfix\"&&</ul>","线路数组":"<ul class=\"stui-content__playlist clearfix\"&&</ul>","播放列表":"<li","播放标题":">&&</a>","播放链接":"href=\"&&\""}`
+	good := `{"主页url":"https://www.6789ysw.com/","详情url":"https://www.6789ysw.com/vod/{id}.html","数组":"<li class=\"col-md-6 col-sm-4 col-xs-3\"&&</li>","二次截取":"<div class=\"col-lg-wide-75 col-xs-1 padding-0\"&&","标题":"title=\"&&\"","链接":"href=\"&&\"","列表图片":"data-original=\"&&\"","播放数组":"<ul class=\"stui-content__playlist clearfix\"&&</ul>","线路数组":"<ul class=\"stui-content__playlist clearfix\"&&</ul>","播放列表":"<li","播放标题":">&&</a>","播放链接":"href=\"&&\""}`
 	for _, issue := range Check(good, samples) {
 		t.Errorf("多线路好规则被误报: [%s] %s", issue.Field, issue.Problem)
 	}
@@ -517,6 +518,27 @@ func TestTemplateBlockCategoryMergePaging(t *testing.T) {
 	}
 }
 
+// TestCheckDetailURLNotRequired 固化取消后的设定（10-10）：详情url 不再硬性必写——
+// 简写形态缺 详情url 不报错；写了也不误报；且不再出现「必写字段」类拦截。
+func TestCheckDetailURLNotRequired(t *testing.T) {
+	samples := []ai.Sample{
+		{Label: "首页 https://a.com", Content: `<a href="/voddetail/120200.html" title="剧">剧</a>`},
+	}
+	missing := `{"主页url":"https://a.com","分类url":"https://a.com/vodtype/{cateId}-{catePg}.html","分类":"电影$1#电视剧$2"}`
+	if hasIssue(Check(missing, samples), "详情url", "必写字段") {
+		t.Errorf("详情url 已不作硬性必写，缺失不应被拦截：%s", dumpIssues(Check(missing, samples)))
+	}
+	for _, issue := range Check(missing, samples) {
+		if issue.Field == "详情url" {
+			t.Errorf("缺失 详情url 不应产生任何 详情url 问题：%s", issue.Problem)
+		}
+	}
+	written := `{"主页url":"https://a.com","分类url":"https://a.com/vodtype/{cateId}-{catePg}.html","分类":"电影$1#电视剧$2","详情url":"https://a.com/voddetail/{id}.html"}`
+	if hasIssue(Check(written, samples), "详情url", "必写字段") {
+		t.Errorf("已写 详情url 的规则不应被报缺失：%s", dumpIssues(Check(written, samples)))
+	}
+}
+
 // TestCheckFailedCategoryID 固化自检拦截：规则 分类 里写了实测失败分类的 ID → 报错。
 func TestCheckFailedCategoryID(t *testing.T) {
 	samples := []ai.Sample{
@@ -583,6 +605,71 @@ func TestCheckArrayAnchorTooWide(t *testing.T) {
 	for _, issue := range Check(precise, samples) {
 		if issue.Field == "数组" && strings.Contains(issue.Problem, "锚点过宽") {
 			t.Errorf("精确锚点被误报：%v", issue)
+		}
+	}
+}
+
+// TestCheck55ys9JarCollapseAndMetaIntro 固化 55ys9 教训（用户实测反馈两 bug）：
+// ① 规则不写 播放列表 时真 jar 默认按 # 切分集，stui 分集 <li> 连排、段内没有 # →
+//
+//	整段当 1 集（真机只显示一集）。自检必须按 jar 语义模拟切分并确定性拦截。
+//	（我们引擎 Rule.Field 有模板默认会掩盖此 bug——静态看"没问题"，真机就是坏。）
+//
+// ② 简介锚点 "剧情:" 只存在于 <head> 的 <meta description>，正文一次没有；
+//
+//	配宽结尾 &&</p> 会从 meta 一路吞进正文甚至 var maccms 脚本。锚点命中位置在 <body> 之前 → meta 陷阱，必须报。
+//
+// 修正版规则（正文简介锚点 + 播放列表="</li>"）在这两个字段上不得误报。
+func TestCheck55ys9JarCollapseAndMetaIntro(t *testing.T) {
+	metaLine := `<meta name="description" content="《无法绝望的男人》剧情:丈夫离世后，妻子独自抚养孩子。" />`
+	var pannels strings.Builder
+	for line := 1; line <= 3; line++ {
+		ls := strconv.Itoa(line)
+		pannels.WriteString(`<div class="stui-vodlist__head"><h3 class="title">播放线路 ` + ls +
+			`</h3></div><div class="stui-pannel_bd col-pd clearfix"><ul class="stui-content__playlist clearfix">`)
+		for ep := 1; ep <= 4; ep++ {
+			pannels.WriteString(`<li><a href="/play/100-` + ls + `-` + strconv.Itoa(ep) + `.html" title="第0` + strconv.Itoa(ep) + `集"><span>第0` + strconv.Itoa(ep) + `集</span></a></li>`)
+		}
+		pannels.WriteString(`</ul></div>`)
+	}
+	detail := `<html><head>` + metaLine + `<title>无法绝望的男人</title></head>` +
+		`<body class="stui-headers"><div class="stui-content__detail"><h1 class="title">无法绝望的男人</h1>` +
+		`<p class="desc hint--bottom"><span class="left">类型：</span><span class="video-type"><a href="/vodtype/2.html">电视剧</a></span>` +
+		`<span class="split-line">/</span><span class="left">地区：</span><span>韩国</span></p>` +
+		`<div class="stui-content__art"><p class="col-pd">简介：</span><span class="skill">《无法绝望的男人》讲述…</span><a href="#desc">展开</a>更多简介</p>` +
+		`<span class="vod-detail-name">导演：</span><span>金某</span>` +
+		`<span class="vod-detail-name">主演：</span><span>张某</span></div>` +
+		`<img class="stui-content__thumb v-lazy" data-original="https://img/x.jpg"/>` +
+		`</div>` + pannels.String() +
+		`<script>var maccms={"path":"","mid":"1","url":"www.55ys9.com"};</script></body></html>`
+	var catItems strings.Builder
+	for i := 1; i <= 6; i++ {
+		catItems.WriteString(`<li class="col-md-6 col-sm-4 col-xs-3"><div class="stui-vodlist__box">` +
+			`<a class="stui-vodlist__thumb v-lazy" href="/vod/10` + strconv.Itoa(i) + `.html" title="剧` + strconv.Itoa(i) +
+			`" data-original="https://img/x` + strconv.Itoa(i) + `.jpg"><span class="pic-text text-right">HD</span></a></div></li>`)
+	}
+	catalog := `<html><head><title>电视剧</title></head><body class="stui-headers"><ul class="stui-vodlist clearfix">` + catItems.String() + `</ul></body></html>`
+	samples := []ai.Sample{
+		{Label: "分类页 https://www.55ys9.com/list/2-1.html", Content: catalog},
+		{Label: "详情页 https://www.55ys9.com/vod/1001.html", Content: detail},
+	}
+
+	// ① 用户原始坏规则：没写 播放列表、简介抄 meta 的 "剧情:"。
+	userBad := `{"主页url":"https://www.55ys9.com","请求头":"Mozilla/5.0##Chrome/120","分类":"电视剧$2#电影$1","分类url":"https://www.55ys9.com/list/{cateId}-{catePg}.html","搜索url":"https://www.55ys9.com/search/-------------.html?wd={wd}","详情url":"https://www.55ys9.com/vod/{id}.html","数组":"<li class=\"col-md-6 col-sm-4 col-xs-3\"&&</li>","二次截取":"<ul class=\"stui-vodlist clearfix\">&&</ul>","标题":"title=\"&&\"","链接":"href=\"&&\"","列表图片":"data-original=\"&&\"","副标题":"<span class=\"pic-text text-right\">&&</span>","简介":"剧情:&&</p>","封面":"data-original=\"&&\"","类型":"类型：&&</span>","导演":"导演：&&</span>","主演":"主演：&&</span>","播放数组":"<ul class=\"stui-content__playlist clearfix\"&&</ul>","播放标题":">&&</a>","播放链接":"href=\"&&\"","线路二次截取":"<div class=\"stui-pannel_hd\">&&</div>","线路数组":"<div class=\"stui-pannel_bd col-pd clearfix\">&&</div>","线路标题":"<h3 class=\"title\">&&</h3>"}`
+	issues := Check(userBad, samples)
+	t.Logf("用户原始规则检出：%s", dumpIssues(issues))
+	if !hasIssue(issues, "播放列表", "默认按 # 切分集") {
+		t.Errorf("不写 播放列表 的 jar 塌缩（真机只出一集）未被拦截：%s", dumpIssues(issues))
+	}
+	if !hasIssue(issues, "简介", "只出现在 <head>") {
+		t.Errorf("简介锚点抄自 <head> meta（剧情:）的陷阱未被拦截：%s", dumpIssues(issues))
+	}
+
+	// ② 修正版规则：正文简介锚点 + 播放列表="</li>"，这两个字段不得误报。
+	fixed := `{"主页url":"https://www.55ys9.com","分类":"电视剧$2#电影$1","分类url":"https://www.55ys9.com/list/{cateId}-{catePg}.html","搜索url":"https://www.55ys9.com/search/-------------.html?wd={wd}","详情url":"https://www.55ys9.com/vod/{id}.html","数组":"<li class=\"col-md-6 col-sm-4 col-xs-3\"&&</li>","二次截取":"<ul class=\"stui-vodlist clearfix\">&&</ul>","标题":"title=\"&&\"","链接":"href=\"&&\"","列表图片":"data-original=\"&&\"","副标题":"<span class=\"pic-text text-right\">&&</span>","简介":"简介：</span>&&<a href=\"#desc\">","封面":"data-original=\"&&\"","类型":"类型：</span>&&<","导演":"导演：</span>&&<","主演":"主演：</span>&&<","播放数组":"<ul class=\"stui-content__playlist clearfix\"&&</ul>","线路数组":"<div class=\"stui-pannel_bd col-pd clearfix\">&&</div>","播放列表":"</li>","播放标题":"\">&&</a>","播放链接":"href=\"&&\"","线路标题":"<h3 class=\"title\">&&</h3>"}`
+	for _, issue := range Check(fixed, samples) {
+		if issue.Field == "简介" || issue.Field == "播放列表" {
+			t.Errorf("修正版规则被误报: [%s] %s", issue.Field, issue.Problem)
 		}
 	}
 }

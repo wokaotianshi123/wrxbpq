@@ -31,6 +31,12 @@
       <label class="wide">API Key<input id="apiKey" type="password" placeholder="sk-...（仅保存在本机浏览器）"></label>
     </div>
     <div class="row">
+      <label class="inline">生成版本
+        <select id="ruleVersion">
+          <option value="simple">简写版（模板兜底，字段精简）</option>
+          <option value="full">完整版（字段全部显式写全）</option>
+        </select>
+      </label>
       <button id="btnGenerate">生成规则</button>
       <button id="btnFix" class="ghost" disabled>按验证结果修复</button>
       <span id="genStatus" class="status"></span>

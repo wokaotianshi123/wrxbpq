@@ -29,6 +29,7 @@ function loadConfig() {
     if (saved.model) $('model').value = saved.model;
     if (saved.apiKey) $('apiKey').value = saved.apiKey;
     if (saved.notes) $('notes').value = saved.notes;
+    if (saved.version && $('ruleVersion')) $('ruleVersion').value = saved.version;
   } catch (_) { /* 忽略损坏的本地配置 */ }
 }
 
@@ -38,6 +39,7 @@ function saveConfig() {
     model: $('model').value.trim(),
     apiKey: $('apiKey').value.trim(),
     notes: $('notes').value.trim(),
+    version: $('ruleVersion') ? $('ruleVersion').value : 'simple',
   }));
 }
 
@@ -170,6 +172,7 @@ async function generate(isFix) {
       rule: isFix ? rule : '',
       problems: isFix ? state.problems : [],
       notes: $('notes').value.trim(),
+      version: $('ruleVersion') ? $('ruleVersion').value : 'simple',
       baseUrl: $('baseUrl').value.trim(),
       apiKey: $('apiKey').value.trim(),
       model: $('model').value.trim(),
@@ -187,7 +190,8 @@ async function generate(isFix) {
     $('rule').value = data.rule;
     if (data.samples && data.samples.length) state.samples = data.samples;
     if (data.fingerprint) state.fingerprint = data.fingerprint;
-    let done = isFix ? '已修复规则（请重新验证）' : '已生成规则';
+    const versionTag = data.version === 'full' ? '完整版' : '简写版';
+    let done = isFix ? `已修复规则（${versionTag}，请重新验证）` : `已生成${versionTag}规则`;
     if (data.templateHit) done += ` — 命中模板：${data.templateHit}`;
     $('genStatus').textContent = done;
     state.problems = [];
@@ -252,6 +256,8 @@ function setBusy(busy) {
   ['btnProbe', 'btnGenerate', 'btnVerify', 'btnFix'].forEach((id) => {
     $(id).disabled = busy;
   });
+  const sel = $('ruleVersion');
+  if (sel) sel.disabled = busy;
   if (!busy) updateGenerateEnabled();
 }
 
@@ -301,6 +307,8 @@ $('btnDownload').addEventListener('click', downloadRule);
 ['baseUrl', 'model', 'apiKey', 'notes'].forEach((id) => {
   $(id).addEventListener('change', saveConfig);
 });
+// 版本选择同样持久化，刷新页面后保持上次选的简写/完整版。
+if ($('ruleVersion')) $('ruleVersion').addEventListener('change', saveConfig);
 // 站点地址一变，旧样本即失效，必须重新抓取才能生成。
 $('site').addEventListener('input', () => {
   if (state.samples && state.samples.length) {

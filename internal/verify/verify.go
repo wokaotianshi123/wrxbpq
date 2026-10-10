@@ -92,6 +92,11 @@ func Probe(ctx context.Context, siteURL string, limit int) ([]ai.Sample, error) 
 			samples = append(samples, ai.Sample{Label: "详情页 " + detailAddress, Content: clipHTML(body, limit)})
 		}
 	}
+	// 「详情url」模板样本：给出由真实详情页地址实测反推的 详情url 模板。
+	// 该字段不是硬性必写（10-10 取消旧规定）——简写版可省略靠兜底，完整版应显式写出；
+	// 无论哪版，写了就照这里的实测模板抄。模板从真实详情页地址反推（ID 段替换成 {id}
+	// 后再拼回去、与原地址逐字一致才算实测通过），不做静态猜测。
+	samples = append(samples, detailURLSample(detailAddress))
 	playCaptured := false
 	if playLink := pickFirstHref(detailBody, playHints); playLink != "" {
 		playCaptured = fetchPlay(ctx, fetcher, xbpq.Absolute(detailAddress, playLink), detailAddress, &samples, limit)
@@ -140,6 +145,71 @@ func fetchPlay(ctx context.Context, fetcher *xbpq.Fetcher, address, referer stri
 	}
 	*samples = append(*samples, ai.Sample{Label: "播放页 " + address, Content: clipHTML(playBody, limit*3/2)})
 	return true
+}
+
+// samplePureID 裸数字 ID（供详情url 模板反推）。
+var samplePureID = regexp.MustCompile(`^[0-9]{1,12}$`)
+
+// detailIDPosition 从真实详情页 URL 反推 详情url 模板：数字 ID 在路径段
+// （/voddetail/120200.html、/detail/138557/、/type/tv/123/）或 query 参数（?id=123）形态逐一尝试；
+// 产出后用"占位符回填 → 必须与原地址逐字一致"自校验——不做静态猜测。
+func detailIDPosition(address string) (template, exampleID string, ok bool) {
+	parsed, err := url.Parse(address)
+	if err != nil || parsed.Host == "" {
+		return "", "", false
+	}
+	base := parsed.Scheme + "://" + parsed.Host
+	segments := strings.Split(parsed.Path, "/")
+	for index := len(segments) - 1; index >= 1; index-- {
+		segment := segments[index]
+		stem, ext := segment, ""
+		if dot := strings.LastIndex(segment, "."); dot > 0 {
+			stem, ext = segment[:dot], segment[dot:]
+		}
+		if !samplePureID.MatchString(stem) {
+			continue
+		}
+		guard := segments[index]
+		segments[index] = "{id}" + ext
+		candidate := base + strings.Join(segments, "/")
+		segments[index] = guard
+		if strings.Replace(candidate, "{id}", stem, 1) == address {
+			return candidate, stem, true
+		}
+	}
+	// query 形态：恰好一个参数值是纯数字。
+	query := parsed.Query()
+	var keys []string
+	for key := range query {
+		if samplePureID.MatchString(query.Get(key)) {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 1 {
+		value := query.Get(keys[0])
+		candidate := base + parsed.Path + "?" + strings.Replace(parsed.RawQuery, keys[0]+"="+value, keys[0]+"={id}", 1)
+		if strings.Replace(candidate, "{id}", value, 1) == address {
+			return candidate, value, true
+		}
+	}
+	return "", "", false
+}
+
+// detailURLSample 生成「详情url 模板」样本：给出实测反推的 详情url 模板（或形态识别失败提示）。
+// 详情url 非硬性必写——简写版可省略靠兜底，完整版应显式写出；写了就照本样本的实测模板抄。
+func detailURLSample(detailAddress string) ai.Sample {
+	if detailAddress == "" {
+		return ai.Sample{Label: "详情url 模板", Content: "详情url 字段（占位符 {id}）不是硬性必写：简写版可省略，交给模板/列表链接还原兜底。" +
+			"本次未抓到详情页，无法实测模板——若选完整版需要写 详情url，请按列表链接形态里找数字 ID 段换成 {id}，并以 detail 步骤实测为准。"}
+	}
+	template, exampleID, ok := detailIDPosition(detailAddress)
+	if !ok {
+		return ai.Sample{Label: "详情url 模板", Content: "详情url 字段（占位符 {id}）不是硬性必写：简写版可省略靠兜底。" +
+			"详情页地址 " + detailAddress + " 里未识别出可反推的数字 ID 形态——若要写 详情url（完整版应写），从详情页样本里按站点实际 URL 结构写，写好后用 detail 步骤实测确认拼出的地址能打开。"}
+	}
+	return ai.Sample{Label: "详情url 模板", Content: "详情url 字段（占位符 {id}）不是硬性必写：简写版可省略交给兜底，完整版应显式写出。" +
+		"\n实测详情url模板：\"" + template + "\"（由真实详情页 " + detailAddress + " 反推：ID 段 " + exampleID + " 换成 {id}，回填比对与原地址逐字一致）" +
+		"\n要写 详情url 就照抄上面这个实测模板（列表条目链接里的数字 ID 会填进 {id}），禁止改形态；写完后以 detail 步骤实测能打开为准。"}
 }
 
 var (

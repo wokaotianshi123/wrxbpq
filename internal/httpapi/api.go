@@ -75,6 +75,7 @@ type generateRequest struct {
 	Problems []string    `json:"problems"`
 	Notes    string      `json:"notes"`
 	Samples  []ai.Sample `json:"samples"`
+	Version  string      `json:"version"` // "simple"=简写版（默认） "full"=完整版（字段全部显式写全，不靠模板兜底）
 	BaseURL  string      `json:"baseUrl"`
 	APIKey   string      `json:"apiKey"`
 	Model    string      `json:"model"`
@@ -89,6 +90,7 @@ type generateResponse struct {
 	Samples     []ai.Sample `json:"samples,omitempty"`
 	Fingerprint string      `json:"fingerprint,omitempty"`
 	TemplateHit string      `json:"templateHit,omitempty"`
+	Version     string      `json:"version,omitempty"` // 回显本次实际使用的版本（simple/full）
 }
 
 // HandleGenerate 调 AI 生成（或修复）规则。
@@ -131,11 +133,12 @@ func HandleGenerate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var messages []ai.Message
+	ruleVersion := ai.NormalizeRuleVersion(request.Version)
 	siteFingerprint := fingerprint.Analyze(samples)
 	if strings.TrimSpace(request.Rule) != "" {
-		messages = ai.BuildFixMessages(request.Site, request.Rule, request.Problems, samples, request.Notes, siteFingerprint)
+		messages = ai.BuildFixMessages(request.Site, request.Rule, request.Problems, samples, request.Notes, siteFingerprint, ruleVersion)
 	} else {
-		messages = ai.BuildGenerateMessages(request.Site, samples, request.Notes, siteFingerprint)
+		messages = ai.BuildGenerateMessages(request.Site, samples, request.Notes, siteFingerprint, ruleVersion)
 	}
 	content, err := ai.Chat(cfg, messages)
 	if err != nil {
@@ -158,7 +161,7 @@ func HandleGenerate(w http.ResponseWriter, r *http.Request) {
 		for _, issue := range issues {
 			problems = append(problems, "字段「"+issue.Field+"」："+issue.Problem)
 		}
-		retryMessages := ai.BuildFixMessages(request.Site, rule, problems, samples, request.Notes, siteFingerprint)
+		retryMessages := ai.BuildFixMessages(request.Site, rule, problems, samples, request.Notes, siteFingerprint, ruleVersion)
 		if retryContent, retryErr := ai.Chat(cfg, retryMessages); retryErr == nil {
 			if retried := ExtractRule(retryContent); retried != "" {
 				if _, retryOK := xbpq.ParseRule(retried); retryOK && len(fingerprint.Check(retried, samples)) < len(issues) {
@@ -174,6 +177,7 @@ func HandleGenerate(w http.ResponseWriter, r *http.Request) {
 		Samples:     samples,
 		Fingerprint: siteFingerprint,
 		TemplateHit: templateHitNames(rule),
+		Version:     ruleVersion,
 	})
 }
 

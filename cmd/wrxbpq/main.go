@@ -105,6 +105,7 @@ func runGenerate(args []string) error {
 	model := set.String("model", os.Getenv("AI_MODEL"), "模型名")
 	rule := set.String("rule", "", "已有规则（给了则进入修复模式）")
 	note := set.String("note", "", "给 AI 的补充说明（站点特性、期望字段等）")
+	version := set.String("version", "simple", "生成版本：simple=简写靠模板兜底 / full=完整版字段全部显式写全")
 	timeout := set.Int("timeout", 180, "AI 调用超时（秒）")
 	out := set.String("out", "", "规则输出文件（默认打印到标准输出）")
 	_ = set.Parse(args)
@@ -129,9 +130,9 @@ func runGenerate(args []string) error {
 		if readErr != nil {
 			return readErr
 		}
-		messages = ai.BuildFixMessages(*site, string(raw), nil, samples, *note, siteFingerprint)
+		messages = ai.BuildFixMessages(*site, string(raw), nil, samples, *note, siteFingerprint, *version)
 	} else {
-		messages = ai.BuildGenerateMessages(*site, samples, *note, siteFingerprint)
+		messages = ai.BuildGenerateMessages(*site, samples, *note, siteFingerprint, *version)
 	}
 	fmt.Println("正在调用 AI…")
 	content, err := ai.Chat(ai.Config{BaseURL: *baseURL, APIKey: *apiKey, Model: *model, Timeout: *timeout}, messages)

@@ -304,9 +304,21 @@ func templateBlock(home, catalog, detail, origin, paging, category string) strin
 			lines = append(lines, fmt.Sprintf("⚠ 皮肤是 %s 但命中模板链以其它皮肤为主，模板默认可能截不到——简写后务必逐步验证，失败字段按样本补写。", skin))
 		}
 	}
-	skippable := xbpq.TemplateFieldNames(merged)
+	skippable := make([]string, 0, len(merged))
+	for _, name := range xbpq.TemplateFieldNames(merged) {
+		// 播放列表 不列进"可省略"：本引擎有模板默认（<a/<li）能兜底，但真机 jar 默认按 # 切分集，
+		// stui/MacCMS 分集 <li> 连排段内无 # → 真机只剩 1 集（55ys9 实测教训）。两版都应显式写。
+		if name == "播放列表" {
+			continue
+		}
+		skippable = append(skippable, name)
+	}
 	lines = append(lines, "这些字段引擎会用模板兜底、【可以省略不写】："+strings.Join(skippable, "、"))
+	lines = append(lines, "⚠ 播放列表【不要省略】：本引擎有模板默认能兜底，但真机 jar 默认按 # 切分集，"+
+		"stui/MacCMS 分集是 <li> 连排、段内没有 #，jar 会把整段当 1 集（真机只显示一集）。"+
+		"简写版、完整版都应显式写 播放列表——分集是 <li> 结构写 </li>，有 # 之类符号就写那个符号（它是分隔符，禁止写成 前缀&&后缀）。")
 	lines = append(lines, "简写规则仍【必须写】：分类、分类url（含域名的绝对地址、必含 {cateId} 与 {catePg}）、搜索url（若模板没给）、以及样本里与皮肤不符、模板截不到的字段。")
+	lines = append(lines, "详情url 可省略（模板/列表链接还原兜底）；但一旦要写，形态逐字照抄样本「详情url 模板」给出的实测模板——完整版规则按「字段全部显式写全」应把它写出来。")
 	lines = append(lines, "策略：能对上皮肤的字段直接省略靠模板；模板指纹没覆盖、或与样本 HTML 不一致的字段，回到样本逐字实测再写，不要盲信模板默认值。")
 	return strings.Join(lines, "\n")
 }

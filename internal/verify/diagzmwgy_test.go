@@ -7,6 +7,34 @@ import (
 	"time"
 )
 
+// TestDetailIDPositionForms 固化「详情url 模板」样本的反推逻辑：数字 ID 在路径段（含 .html 尾巴）、
+// 目录段、query 参数三种形态都要反推成功，且回填比对与原地址逐字一致；非数字 ID 不硬猜。
+func TestDetailIDPositionForms(t *testing.T) {
+	cases := []struct {
+		address  string
+		wantTemp string // 空 = 应反推失败
+		wantID   string
+	}{
+		{"https://zmwgy.net/voddetail/120200.html", "https://zmwgy.net/voddetail/{id}.html", "120200"},
+		{"https://a.com/detail/138557/", "https://a.com/detail/{id}/", "138557"},
+		{"https://a.com/vod/55.html", "https://a.com/vod/{id}.html", "55"},
+		{"https://a.com/index.php?m=vod&c=detail&id=9527", "https://a.com/index.php?m=vod&c=detail&id={id}", "9527"},
+		{"https://a.com/movie/sc-2026.html", "", ""}, // 非数字 ID：不猜
+	}
+	for _, c := range cases {
+		template, id, ok := detailIDPosition(c.address)
+		if c.wantTemp == "" {
+			if ok {
+				t.Errorf("%s: 不应反推成功，实际模板 %q id %q", c.address, template, id)
+			}
+			continue
+		}
+		if !ok || template != c.wantTemp || id != c.wantID {
+			t.Errorf("%s: 反推 = (%q,%q,%v)，期望 (%q,%q)", c.address, template, id, ok, c.wantTemp, c.wantID)
+		}
+	}
+}
+
 // TestPickFirstHrefMacCMSNames 固化 MacCMS 命名的详情/播放链接识别（zmwgy.net 教训：
 // 旧 detailHints 只认 /vod/…、playHints 只认 /play/…，/voddetail/ 与 /vodplay/ 整段不匹配，
 // 链式探测在详情环节断链 → 详情页、播放页样本双双缺失，AI 写源没有播放页参考）。
