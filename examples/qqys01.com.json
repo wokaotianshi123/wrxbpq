@@ -1,0 +1,8 @@
+{
+  "主页url": "https://www.qqys01.com",
+  "请求头": "User-Agent$Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "分类": "电影$1#连续剧$2#综艺$3#动漫$4",
+  "分类url": "https://www.qqys01.com/vodshow/{cateId}--------{catePg}---.html",
+  "搜索url": "https://www.qqys01.com/vodsearch/-------------.html?wd={wd}",
+  "详情url": "https://www.qqys01.com/voddetail{id}.html"
+}

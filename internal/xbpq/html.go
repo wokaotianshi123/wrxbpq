@@ -104,7 +104,8 @@ var playerDataPattern = regexp.MustCompile(`(?s)player_aaaa\s*=\s*(\{.*?\})`)
 
 var playerDataFallback = regexp.MustCompile(`(?s)player_data\s*=\s*(\{.*?\})`)
 
-var playerFieldPattern = regexp.MustCompile(`"?(\w+)"?\s*:\s*"((?:[^"\\]|\\.)*)"`)
+// 值两种形态：带引号字符串 "url":"…"；或裸标记 "encrypt":2 / "server":"no"（MacCMS player_data）。
+var playerFieldPattern = regexp.MustCompile(`"?(\w+)"?\s*:\s*(?:"((?:[^"\\]|\\.)*)"|(-?\d+(?:\.\d+)?|true|false|null))`)
 
 // PlayerFields 解析播放页中的 player_aaaa / player_data 对象。
 func PlayerFields(body string) map[string]string {
@@ -118,11 +119,15 @@ func PlayerFields(body string) map[string]string {
 	}
 	blob := strings.ReplaceAll(matches[1], `\/`, "/")
 	for _, pair := range playerFieldPattern.FindAllStringSubmatch(blob, -1) {
-		if len(pair) < 3 {
+		if len(pair) < 4 {
 			continue
 		}
+		value := pair[2]
+		if value == "" {
+			value = pair[3] // 裸标记形态（encrypt:2）
+		}
 		if _, exists := fields[pair[1]]; !exists {
-			fields[pair[1]] = pair[2]
+			fields[pair[1]] = value
 		}
 	}
 	return fields
@@ -160,6 +165,16 @@ func DecryptPlayerURL(raw, encrypt string) string {
 	case "2":
 		if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil {
 			return UnescapeJS(string(decoded))
+		}
+		// MacCMS 二级加密形态（qqys01.com 式 encrypt:2）：base64 之后再套一层 urlencode
+		// （每个 '%' 编码成 %25，解出来是 hex 百分号编码串，需再 url.QueryUnescape 一次）。
+		// 特征：纯 [A-Za-z0-9%]+ 且含 %——裸 base64 失败时先 urldecode 再试 base64。
+		if strings.ContainsRune(raw, '%') {
+			if unescaped, err := url.QueryUnescape(raw); err == nil && unescaped != raw {
+				if decoded, err := base64.StdEncoding.DecodeString(unescaped); err == nil {
+					return UnescapeJS(string(decoded))
+				}
+			}
 		}
 		return raw
 	default:

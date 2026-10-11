@@ -708,6 +708,17 @@ func (e *Engine) Resolve(ctx context.Context, chapter Chapter) (Media, error) {
 	media, err := e.resolveOne(ctx, pageURL, referer)
 	if err == nil {
 		media.Variants = e.resolveRoutes(ctx, chapter.Routes)
+		// MacCMS 混合资源站（qqys01.com 式）：同一集并存的线路里，lzm3u8/dbm3u8 等
+		// 是 m3u8 直链，qq/youku/bilibili 是三方站 HTML 页（合法 http 但不是可播直链）。
+		// 主线路不是媒体直链而某备选线路是时，换入该直链——否则 play 实测拿到 HTML 页判失败。
+		if !LooksLikeMedia(media.URL) {
+			for _, variant := range media.Variants {
+				if LooksLikeMedia(variant.URL) {
+					media.URL, media.Referer = variant.URL, variant.Referer
+					break
+				}
+			}
+		}
 		return media, nil
 	}
 	for _, route := range chapter.Routes {

@@ -209,6 +209,10 @@ func fetchPlay(ctx context.Context, fetcher *xbpq.Fetcher, address, referer stri
 // samplePureID 裸数字 ID（供详情url 模板反推）。
 var samplePureID = regexp.MustCompile(`^[0-9]{1,12}$`)
 
+// gluedDetailIDPattern "关键词与数字 ID 紧贴"的详情段（qqys01.com 式 /voddetail12543.html）。
+// 组1=完整前缀关键词（含可选 vod），组2=数字 ID——回填 详情url 模板时整组1原样保留。
+var gluedDetailIDPattern = regexp.MustCompile(`(?i)^((?:vod)?(?:detail|movie|drama|show))([0-9]{2,})$`)
+
 // detailIDPosition 从真实详情页 URL 反推 详情url 模板：数字 ID 在路径段
 // （/voddetail/120200.html、/detail/138557/、/type/tv/123/）或 query 参数（?id=123）形态逐一尝试；
 // 产出后用"占位符回填 → 必须与原地址逐字一致"自校验——不做静态猜测。
@@ -225,15 +229,25 @@ func detailIDPosition(address string) (template, exampleID string, ok bool) {
 		if dot := strings.LastIndex(segment, "."); dot > 0 {
 			stem, ext = segment[:dot], segment[dot:]
 		}
-		if !samplePureID.MatchString(stem) {
-			continue
+		if samplePureID.MatchString(stem) {
+			guard := segments[index]
+			segments[index] = "{id}" + ext
+			candidate := base + strings.Join(segments, "/")
+			segments[index] = guard
+			if strings.Replace(candidate, "{id}", stem, 1) == address {
+				return candidate, stem, true
+			}
 		}
-		guard := segments[index]
-		segments[index] = "{id}" + ext
-		candidate := base + strings.Join(segments, "/")
-		segments[index] = guard
-		if strings.Replace(candidate, "{id}", stem, 1) == address {
-			return candidate, stem, true
+		// 紧贴形态（qqys01.com 式 /voddetail12543.html）：段名后缀直接跟数字 ID，
+		// 无斜杠分隔。关键词表与 detailGluedIDPattern 对齐，ID 至少 2 位避免误伤。
+		if glued := gluedDetailIDPattern.FindStringSubmatch(stem); len(glued) == 3 {
+			guard := segments[index]
+			segments[index] = glued[1] + "{id}" + ext
+			candidate := base + strings.Join(segments, "/")
+			segments[index] = guard
+			if strings.Replace(candidate, "{id}", glued[2], 1) == address {
+				return candidate, glued[2], true
+			}
 		}
 	}
 	// query 形态：恰好一个参数值是纯数字。
@@ -282,7 +296,9 @@ var (
 	// 末路 /[\w-]+/[0-9]{3,}\.html 补苹果CMS新版 mxone 皮肤（hanjuds.com 式）：
 	// 详情是 /{分类目录}/{数字}.html（如 /80s/156040.html），没有 vod/detail 关键词段，
 	// 原形态全部不匹配 → 分类页扒不到详情链接、Probe 停在分类页、指纹缺详情/播放样本。
-	detailHints = regexp.MustCompile(`(?i)/(?:vod)?(?:detail|vod|movie|drama)/[0-9][\w./-]*|/[\w-]+/[0-9]{3,}\.html`)
+	// 中间分支补"关键词与 ID 紧贴"形态（qqys01.com 式 /voddetail12543.html）：
+	// 斜杠分支要求 / 紧跟关键词，紧贴写法整段不匹配 → 同样断链。
+	detailHints = regexp.MustCompile(`(?i)/(?:vod)?(?:detail|vod|movie|drama)/[0-9][\w./-]*|/(?:vod)?(?:detail|movie|drama)[0-9]{2,}[\w.-]*|/[\w-]+/[0-9]{3,}\.html`)
 	// 播放页要能覆盖 /play/55388-1-1.html、/play/137736-1-1/ 与 MacCMS 的 /vodplay/120200-1-1.html。
 	// 末路补 mxone 连字符命名 /{目录}/play-{id}-{线}-{集}.html（hanjuds.com 式）：
 	// 原形态要求 play/ 斜杠紧跟，play- 整段不匹配 → 详情页扒不到播放链接、play 环节断链。
@@ -594,17 +610,16 @@ func firstCategoryID(engine *xbpq.Engine) string {
 }
 
 func stepPlay(ctx context.Context, engine *xbpq.Engine, opts Options, chapter *xbpq.Chapter) StepResult {
-	target := chapter
-	if target == nil {
-		id := opts.DetailID
-		if id == "" {
-			dramas, err := engine.Catalog(ctx, firstCategoryID(engine), 1)
-			if err != nil || len(dramas) == 0 {
-				return fail("play", "取不到目录条目，无法选集")
-			}
-			id = dramas[0].SourceID
+	// 用户显式钉了详情 ID：只按指定来，不做换片容错。
+	explicit := opts.DetailID != ""
+	// 链式 detail→play 时 chapter 已选好，先拿它试一次（非显式指定时也允许后续换片兜底）。
+	if chapter != nil {
+		if result := attemptPlay(ctx, engine, chapter); result.OK || explicit {
+			return result
 		}
-		_, chapters, err := engine.Detail(ctx, id)
+	} else if explicit {
+		// 显式指定详情但链里没带 chapter：按 opts.DetailID 取详情再试。
+		_, chapters, err := engine.Detail(ctx, opts.DetailID)
 		if err != nil {
 			return fail("play", fmt.Sprintf("取详情失败: %v", err))
 		}
@@ -615,8 +630,48 @@ func stepPlay(ctx context.Context, engine *xbpq.Engine, opts Options, chapter *x
 		if index < 0 || index >= len(chapters) {
 			index = 0
 		}
-		target = &chapters[index]
+		return attemptPlay(ctx, engine, &chapters[index])
 	}
+	// 自动选片（非显式指定）：混合资源站（qqys01 式）目录前几部可能恰好是
+	// 只有 qq/youku/bilibili 三方 HTML 线路的冷门片，直链验证必挂——这不是规则缺陷。
+	// 依次试目录前 5 部，第一个能解析且直链验证可播即通过；全失败则报最后一次结果。
+	dramas, err := engine.Catalog(ctx, firstCategoryID(engine), 1)
+	if err != nil || len(dramas) == 0 {
+		if chapter != nil {
+			return attemptPlay(ctx, engine, chapter)
+		}
+		return fail("play", "取不到目录条目，无法选集")
+	}
+	var last StepResult
+	if chapter != nil {
+		last = attemptPlay(ctx, engine, chapter)
+	}
+	tried := 0
+	for _, drama := range dramas {
+		if tried >= 5 {
+			break
+		}
+		tried++
+		_, chapters, err := engine.Detail(ctx, drama.SourceID)
+		if err != nil || len(chapters) == 0 {
+			last = fail("play", fmt.Sprintf("《%s》取详情失败或无分集", drama.Title))
+			continue
+		}
+		index := opts.Episode - 1
+		if index < 0 || index >= len(chapters) {
+			index = 0
+		}
+		last = attemptPlay(ctx, engine, &chapters[index])
+		if last.OK {
+			last.Details["选片"] = drama.Title
+			return last
+		}
+	}
+	return last
+}
+
+// attemptPlay 对指定分集解析直链并验证可播。
+func attemptPlay(ctx context.Context, engine *xbpq.Engine, target *xbpq.Chapter) StepResult {
 	media, err := engine.Resolve(ctx, *target)
 	if err != nil {
 		return fail("play", fmt.Sprintf("播放解析失败: %v", err))
@@ -635,31 +690,28 @@ func stepPlay(ctx context.Context, engine *xbpq.Engine, opts Options, chapter *x
 			"备选线路": len(media.Variants),
 		},
 	}
-	if opts.ProbeM3U8 || true {
-		status, head, probeErr := probeMedia(ctx, media.URL, target.PageURL)
-		if probeErr != nil {
-			result.OK = false
-			result.Error = fmt.Sprintf("直链请求失败: %v", probeErr)
-			result.Message = "直链不可达"
-			return result
-		}
-		result.Details["HTTP状态"] = status
-		result.Details["响应头"] = clipString(head, 400)
-		switch classifyProbe(status, head) {
-		case outcomeMedia:
-			result.Message = fmt.Sprintf("第 %d 集可播（HTTP %d，返回 %s）", target.Index, status, mediaKind(head))
-		case outcomeBlocked:
-			// 直链取回了 403/地域拒绝：区分"服务器被 CDN 地域封禁"与"规则真的有问题"。
-			// Vercel 部署在境外机房，国内采集站 CDN 常返回 403 "region denied"，
-			// 但直链能被规则解出且形态合法，说明规则没问题（浏览器/国内网络实测能播即为证），降级为警告。
-			result.Warning = fmt.Sprintf("CDN 拒绝了本机（服务器）IP 的请求（HTTP %d，多为境外机房被国内 CDN 地域封锁或防盗链所致）。这不代表规则有问题——请在浏览器或国内设备上实测播放。", status)
-			result.Message = fmt.Sprintf("第 %d 集解析到直链，但服务器所在地无法验证可播（地域封锁/防盗链）", target.Index)
-		default:
-			result.OK = false
-			result.Error = fmt.Sprintf("响应内容不是 m3u8/mp4（HTTP %d，可能是 HTML 错误页）", status)
-			result.Message = "直链内容异常"
-		}
+	status, head, probeErr := probeMedia(ctx, media.URL, target.PageURL)
+	if probeErr != nil {
+		result.OK = false
+		result.Error = fmt.Sprintf("直链请求失败: %v", probeErr)
+		result.Message = "直链不可达"
 		return result
+	}
+	result.Details["HTTP状态"] = status
+	result.Details["响应头"] = clipString(head, 400)
+	switch classifyProbe(status, head) {
+	case outcomeMedia:
+		result.Message = fmt.Sprintf("第 %d 集可播（HTTP %d，返回 %s）", target.Index, status, mediaKind(head))
+	case outcomeBlocked:
+		// 直链取回了 403/地域拒绝：区分"服务器被 CDN 地域封禁"与"规则真的有问题"。
+		// Vercel 部署在境外机房，国内采集站 CDN 常返回 403 "region denied"，
+		// 但直链能被规则解出且形态合法，说明规则没问题（浏览器/国内网络实测能播即为证），降级为警告。
+		result.Warning = fmt.Sprintf("CDN 拒绝了本机（服务器）IP 的请求（HTTP %d，多为境外机房被国内 CDN 地域封锁或防盗链所致）。这不代表规则有问题——请在浏览器或国内设备上实测播放。", status)
+		result.Message = fmt.Sprintf("第 %d 集解析到直链，但服务器所在地无法验证可播（地域封锁/防盗链）", target.Index)
+	default:
+		result.OK = false
+		result.Error = fmt.Sprintf("响应内容不是 m3u8/mp4（HTTP %d，可能是 HTML 错误页）", status)
+		result.Message = "直链内容异常"
 	}
 	return result
 }

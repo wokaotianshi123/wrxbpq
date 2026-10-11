@@ -1367,6 +1367,14 @@ func playBlock(body string) string {
 			lines = append(lines, "  → 跳转播放链接 建议【整个字段省略不写】——引擎会自动解 iframe src 里的 base64 直链（实测比手写锚点稳，手写 \"url=&&\" 会截出 base64 密文或整段 query）。")
 			return strings.Join(lines, "\n")
 		}
+		// MacCMS player_aaaa/player_data 加密形态（qqys01.com 式 encrypt:2）：url 值是
+		// base64 外套一层 urlencode，明文正则扫不到，但引擎 DecryptPlayerURL 能解。
+		// 用 PlayerURL 实测：能解出 http 直链就建议省略，让引擎兜底。
+		if (strings.Contains(body, "player_aaaa") || strings.Contains(body, "player_data")) && strings.HasPrefix(xbpq.PlayerURL(body), "http") {
+			lines = append(lines, "页面是 player_aaaa/player_data 加密取流（encrypt 标记，无明文直链）：引擎解码示例 "+clipToken(xbpq.PlayerURL(body), 140))
+			lines = append(lines, "  → 跳转播放链接 建议【整个字段省略不写】——引擎会自动按 encrypt 标记解密 url 字段（base64 / urlencode 套 base64 形态都内置）；手写 \"url\":\"&&\" 截出的是密文，放不进播放器。")
+			return strings.Join(lines, "\n")
+		}
 		lines = append(lines, "样本里没找到明文 m3u8/mp4 直链：可能是加密/iframe 二级页，跳转播放链接 需要先解 script 里的变量。")
 		return strings.Join(lines, "\n")
 	}

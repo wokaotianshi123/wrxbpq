@@ -134,6 +134,14 @@ func probePaging(ctx context.Context, fetcher *xbpq.Fetcher, catalogURL, catalog
 	}
 
 	var failures []string
+	// ⓪ MacCMS 导航形态 /vodtype/ 自身无分页控件（站内 _2/-2 拼出来的"第2页"多半是
+	//   伪分页——主列表变但推荐位重合抬分，引擎按条目实测两页全同）。同站 vodshow
+	//   九槽 dash 通道实测更硬：两页都真抓、重合门槛一样，先试它。
+	if anchored && strings.Contains(catalogURL, "/vodtype/") {
+		if finding := probeVodshowDash(ctx, fetcher, catalogURL, idPos); finding.Confirmed {
+			return finding
+		}
+	}
 	// ①先试分类页里真实存在的「下一页/页码」链接。
 	for _, candidate := range linkCandidates {
 		if finding, fail := attempt(candidate, false); fail == "" {
@@ -159,6 +167,51 @@ func probePaging(ctx context.Context, fetcher *xbpq.Fetcher, catalogURL, catalog
 	}
 	return PagingFinding{Note: "分页实测 结论：未通过\n已试候选拼接页：" + strings.Join(capList(failures), "\n") +
 		"\n{catePg} 形态未能实测确定——按 paging 验证结果逐一试下一种形态（/2/、-2.html、?pg=2 等）。"}
+}
+
+// probeVodshowDash MacCMS 站的并行分页通道实测：导航挂 /vodtype/{id}.html 但该形态
+// 自身无分页控件（-2/_2//2 拼接全部被内容比对拒绝）时，同站 MacCMS 标准筛选形态
+// /vodshow/{id}--------2---.html 往往才是真翻页（qqys01.com、555yx.vip 式 module-poster
+// 皮肤实测：vodtype 页翻页后主列表变、推荐位不变，整页 href 重合 88%；vodshow dash
+// 两页重合 0%）。这里抓 dash 的第 1/2 页互拍（栏目名以 dash 自己两页一致为准），
+// 通过即产出 vodshow 组合模板——指纹/AI 据此把 分类url 直接写成 vodshow 形态。
+func probeVodshowDash(ctx context.Context, fetcher *xbpq.Fetcher, catalogURL string, idPos idPosition) PagingFinding {
+	realID := idPos.extractID(catalogURL)
+	if realID == "" || !onlyDigits(realID) {
+		return PagingFinding{}
+	}
+	parsed, err := url.Parse(catalogURL)
+	if err != nil || parsed.Host == "" {
+		return PagingFinding{}
+	}
+	origin := parsed.Scheme + "://" + parsed.Host
+	// MacCMS 九槽 dash 模板（555yx/qqys 实测通过形态）：第9槽（-------- 之后）是页码，
+	// 筛选槽（年份/地区等）留连字符占位。
+	page1 := origin + "/vodshow/" + realID + "--------1---.html"
+	page2 := origin + "/vodshow/" + realID + "--------2---.html"
+	body1, err1 := fetcher.Get(ctx, page1, catalogURL)
+	body2, err2 := fetcher.Get(ctx, page2, page1)
+	if err1 != nil || err2 != nil || len(body1) < 300 || len(body2) < 300 {
+		return PagingFinding{}
+	}
+	first, second := entrySet(body1), entrySet(body2)
+	if len(first) < 3 || len(second) < 3 {
+		return PagingFinding{}
+	}
+	// 栏目名一致性用 dash 自己的第 1 页作基准（跨目录 title 词不同，不能拿 vodtype 页比）。
+	baseLabel := pageTitleLabel(body1)
+	if baseLabel != "" && pageTitleLabel(body2) != baseLabel {
+		return PagingFinding{}
+	}
+	score := overlap(first, second)
+	if score >= 85 {
+		return PagingFinding{}
+	}
+	template := origin + "/vodshow/{cateId}--------{catePg}---.html"
+	note := fmt.Sprintf("分页实测 结论：通过\n实测分类url模板：\"%s\"\n第2页实测地址：%s\n与第1页条目重合仅 %d%%（第1页 %d 条 / 第2页 %d 条），确认翻页生效。",
+		template, page2, score, len(first), len(second))
+	note += "注意：这是同站 MacCMS 标准筛选通道（/vodshow/ dash 九槽形态）实测通过——原导航的 /vodtype/ 形态【不是】真分页（其 -2/_2 拼接页与第1页内容大量重合）。分类url 请整体照抄上面 vodshow 模板（{cateId} 用分类页导航里的数字 id），不要再沿用 vodtype 形态。"
+	return PagingFinding{Confirmed: true, Template: template, SecondURL: page2, Note: note}
 }
 
 func digitOrDash(s string) string {

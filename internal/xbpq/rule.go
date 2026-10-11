@@ -445,6 +445,10 @@ func JoinLink(pageURL, raw string) string {
 var numericIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,17}$`)
 var detailPathPattern = regexp.MustCompile(`(?i)/(?:voddetail|detail|show|vod|drama|movie|tv)/([0-9]+)(?:[-./]|$)`)
 
+// detailGluedIDPattern 识别"目录名与数字 ID 紧贴"的 MacCMS 伪静态形态：
+// /voddetail12543.html、/detail88.html（qqys01.com 式——关键词后没有 / 直接跟 ID）。
+var detailGluedIDPattern = regexp.MustCompile(`(?i)/(?:voddetail|detail|show|vod|drama|movie|tv|xs|vs)([1-9][0-9]{0,17})(?:[-./]|$)`)
+
 // SourceIDFromURL 从详情链接提取数字 ID。
 func SourceIDFromURL(link string) string {
 	parsed, err := url.Parse(link)
@@ -453,6 +457,9 @@ func SourceIDFromURL(link string) string {
 	}
 	path := strings.TrimSuffix(parsed.Path, ".html")
 	if matches := detailPathPattern.FindStringSubmatch(path + "/"); len(matches) > 1 {
+		return matches[1]
+	}
+	if matches := detailGluedIDPattern.FindStringSubmatch(path + "/"); len(matches) > 1 {
 		return matches[1]
 	}
 	cleaned := strings.Trim(path, "/")
