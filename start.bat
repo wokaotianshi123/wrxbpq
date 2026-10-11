@@ -13,11 +13,11 @@ if not exist "%EXE%" (
 
 echo Starting wrxbpq local server on port %PORT% ...
 echo (a server window will open and stay open while running)
-start "" "%~dp0%EXE%"
+start "" "%~dp0%EXE%" serve --port %PORT%
 
 set tries=0
 :wait
-powershell -NoProfile -Command "try { (Invoke-WebRequest -Uri 'http://127.0.0.1:%PORT%/api/health' -UseBasicParsing -TimeoutSec 1).StatusCode | Out-Null } catch { exit 1 }" >nul 2>&1
+powershell -NoProfile -Command "try { (Invoke-WebRequest -Uri 'http://127.0.0.1:%PORT%/api/health' -UseBasicParsing -TimeoutSec 1 -Proxy $null).StatusCode | Out-Null } catch { exit 1 }" >nul 2>&1
 if not errorlevel 1 goto ready
 set /a tries=%tries%+1
 if %tries% geq 40 (

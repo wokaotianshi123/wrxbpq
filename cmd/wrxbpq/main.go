@@ -25,9 +25,14 @@ import (
 )
 
 func main() {
+	// 无参数（双击 exe / start.bat 裸启动）默认起本地服务，不再是打印 usage 后退出——
+	// 服务版打包场景下这就是"运行 start.bat 即打开服务"的入口。
 	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+		if err := runServe(nil); err != nil {
+			fmt.Fprintln(os.Stderr, "错误："+err.Error())
+			os.Exit(1)
+		}
+		return
 	}
 	command := os.Args[1]
 	args := os.Args[2:]
@@ -236,7 +241,8 @@ func printResults(results []verify.StepResult) {
 
 func runServe(args []string) error {
 	set := flag.NewFlagSet("serve", flag.ExitOnError)
-	port := set.Int("port", 8080, "监听端口")
+	// 默认端口 8686：与 start.bat 探测的端口一致（裸启动不带参数时也走这里）。
+	port := set.Int("port", 8686, "监听端口")
 	_ = set.Parse(args)
 	if _, err := os.Stat("public"); err != nil {
 		fmt.Println("提示：未找到 public 目录，前端静态资源不可用（API 仍可用）")
