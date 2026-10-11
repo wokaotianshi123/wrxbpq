@@ -292,10 +292,11 @@ func templateBlock(home, catalog, detail, origin, paging, category string) strin
 			"myui":     {"MacCMS", "MacCMS接口(JSON)", "路径式泛型", "通用高频"},
 			"stui":     {"MacCMS", "MacCMS接口(JSON)", "路径式泛型", "通用高频"},
 			"hl(海蓝)": {"MacCMS", "路径式泛型", "通用高频"},
-			// module(苹果新版) 皮肤对应 mxone 新家族；老 MacCMS/路径式家族的默认链以
-			// stui/myui 的 <ul class="stui-content__playlist"> 为主，截不到 mxone 的
-			// module-blocklist，所以命中这些家族要提示实测补写。
-			"module(苹果新版)": {"MacCMS新版mxone", "通用高频"},
+			// module(苹果新版) 皮肤对应 mxone 新家族；MacCMS 家族的默认链已补
+			// mxone-poster 变体候选（module-poster-item 数组 / module-play-list-content
+			// 线路容器 / module-card-item 搜索卡片，均以 [包含:] 皮肤门控，
+			// stui/myui 站不命中、零副作用），如 555yx.vip（/vodshow/ dash 分类）命中 MacCMS 也可直接简写。
+			"module(苹果新版)": {"MacCMS新版mxone", "MacCMS", "通用高频"},
 		}[skin]
 		compatible := ok == nil
 		for _, name := range ok {
@@ -542,6 +543,34 @@ func catalogBlock(body string) string {
 		}
 		// 实测不达标（页面形态与标准 mxone 有出入），落回通用逻辑。
 		lines = nil
+	}
+	// 苹果CMS mxone 皮肤（555yx.vip 式 poster-items 变体）目录：条目是
+	// <a href="/voddetail/…" title="…" class="module-poster-item module-item"> 整链，
+	// <li> 边界会锚到导航/观影记录列表、数组实测全 ✗。命中皮肤签名走固定建议。
+	// （与上面 hanjuds 式 module-item 分支并列：那个条目是纯 <div>、链接在子 <a>，锚点不同。）
+	if occurrences(body, `module-poster-item module-item`) >= 6 && occurrences(body, `module-play-list`) == 0 &&
+		(occurrences(body, `module-poster-items-base`) >= 1 || occurrences(body, `module-item-cover`) >= 3) {
+		arr := `<a &&</a>[包含:module-poster-item module-item]`
+		entries := xbpq.List(body, arr)
+		links := 0
+		sample := ""
+		for _, entry := range entries {
+			value := strings.TrimSpace(xbpq.CutOnce(entry, `href="&&"`))
+			if strings.HasPrefix(value, "/") && len(value) > 1 && strings.Contains(value, ".html") {
+				links++
+				if sample == "" {
+					sample = value
+				}
+			}
+		}
+		if links >= 3 {
+			lines = append(lines, fmt.Sprintf("目录条目皮肤：苹果CMS mxone（poster-items 变体，条目是 <a class=\"module-poster-item module-item\">，非 <li>）——实测 %q 截出 %d 段、%d 段含详情链接（示例 %s）。",
+				clipToken(arr, 70), len(entries), links, clipToken(sample, 60)))
+			lines = append(lines, "  → 数组 建议逐字照抄上方锚点：起始锚只写到 <a（href/title 在 class 之前，锚进 class 会把 href 吃掉、链接截不出）；[包含:…] 过滤只留海报条目段。")
+			lines = append(lines, "  → 标题 \"title=\\\"&&\\\"\"（封面 <a title> 即片名），链接 \"href=\\\"&&\\\"\"（href 在段内），图片 \"data-original=\\\"&&\\\"\"（懒加载真实地址在 data-original，src= 是占位图），副标题 \"class=\\\"module-item-note\\\">&&</div>\"（第X集/HD）。")
+			return strings.Join(lines, "\n")
+		}
+		// 实测不达标，落回通用逻辑。
 	}
 	// 条目边界：挑出现次数足够的重复标签
 	itemStart, itemEnd := "", ""
@@ -1172,6 +1201,24 @@ func detailBlock(body string) string {
 		routeCount := strings.Count(body, `module-player-list tab-list`)
 		lines = append(lines, fmt.Sprintf("  多线路：该详情页有 %d 条线路容器（module-player-list tab-list），【必须写 线路数组】。", routeCount))
 		lines = append(lines, "  ⚠ 相关推荐条目（video-name 里的 /play-{其它id}-1-1.html）不是本剧分集，写规则时锚点必须框在 module-blocklist/tab-list 容器内，不要按页面级 <a> 截分集。")
+		return strings.Join(lines, "\n")
+	}
+	// 苹果CMS mxone 皮肤（555yx.vip 式 poster-items 变体）：每条线路一个并列的
+	// <div class="module-play-list-content…"> 容器（id=panelN 逐行不同、不能做锚），
+	// 分集 <a class="module-play-list-link"><span>第1集</span></a> 连排、段内无 # 无 <li>。
+	// 通用投票会被页头「我的观影记录」<ul class="drop-content-items historical"> 带偏
+	// （它与真分集同挂 /vodplay/ 链接、票数接近），命中皮肤签名时走固定建议、跳过投票。
+	if strings.Contains(body, `module-play-list-content`) && !strings.Contains(body, `module-player-list tab-list`) {
+		var lines []string
+		if playAt := playHrefPattern.FindStringIndex(body); playAt != nil {
+			lines = append(lines, fmt.Sprintf("分集链接形态（MacCMS /vodplay/{id}-{线}-{集}.html）示例：%s", clipToken(body[playAt[0]:playAt[1]], 90)))
+		}
+		lines = append(lines, "  → 播放数组 建议 \"class=\\\"module-play-list-content&&</div>\"——起始锚取该 div 开始标签去尾 > 的前缀（各行附加类 base/larger 不同、id=panelN 逐条不同，class 前缀逐条一致），结束 </div>；每条线路一个并列容器。")
+		lines = append(lines, "  → 线路数组 与 播放数组 【同锚点】\"class=\\\"module-play-list-content&&</div>\"——引擎按容器段切分线路；锚「我的观影记录」<ul class=\"drop-content-items…\"> 或线路切换按钮会让每条线路 0 集。")
+		lines = append(lines, "  → 播放标题 建议 \"<span>&&</span>\"（分集 <a> 内是 <span>第1集</span>）；播放列表 用 \"</a>\" 或 \"<a\" 分隔（分集 <a> 连排、段内无 #，写 </li> 会把整段当 1 集）；播放链接 \"href=\\\"&&\\\"\"。")
+		routeCount := occurrences(body, `class="module-play-list-content`)
+		lines = append(lines, fmt.Sprintf("  多线路：该详情页有 %d 条线路容器（module-play-list-content），【必须写 线路数组】。线路标题若取不到（分集容器段内无资源名），留空即可，不影响分集与播放。", routeCount))
+		lines = append(lines, "  ⚠ 相关推荐/观影记录里的 /vodplay/ 链接不是本剧分集，写规则时锚点必须框在 module-play-list-content 容器内，不要按页面级 <a> 截分集。")
 		return strings.Join(lines, "\n")
 	}
 	matches, container, prefix, endTag, votes, fromUL := voteEpisodeContainer(body)

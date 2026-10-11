@@ -1,0 +1,23 @@
+{
+  "主页url": "https://555yx.vip",
+  "请求头": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+  "分类": "电影$1#电视剧$13#综艺$3#动漫$4#短剧$45#纪录片$44#韩剧$15",
+  "分类url": "https://555yx.vip/vodshow/{cateId}--------{catePg}---.html",
+  "搜索url": "https://555yx.vip/vodsearch/-------------.html?wd={wd}",
+  "数组": "<a &&</a>[包含:module-poster-item module-item]",
+  "标题": "title=\"&&\"",
+  "图片": "data-original=\"&&\"||data-src=\"&&\"",
+  "副标题": "class=\"module-item-note\">&&</div>",
+  "链接": "href=\"&&\"",
+  "播放数组": "class=\"module-play-list-content&&</div>",
+  "线路数组": "class=\"module-play-list-content&&</div>",
+  "线路标题": "data-name=\"&&\"",
+  "播放列表": "<a",
+  "播放标题": "<span>&&</span>",
+  "播放链接": "href=\"&&\"",
+  "搜索数组": "<div class=\"module-card-item module-item&&<div class=\"module-card-item module-item",
+  "搜索标题": "<strong>&&</strong>",
+  "搜索链接": "href=\"&&\"",
+  "搜索图片": "data-original=\"&&\"",
+  "跳转播放链接": "player_aaaa_*\"url\":\"&&\""
+}

@@ -74,24 +74,21 @@ func Probe(ctx context.Context, siteURL string, limit int) ([]ai.Sample, error) 
 			}
 		}
 	}
-	if detailAddress == "" {
-		if link := pickFirstHref(home, detailHints); link != "" {
-			detailAddress = xbpq.Absolute(siteURL+"/", link)
-		}
+	// 抓回来的"详情页"可能是抓错的分类页：555yx.vip 实测——分类页 /vodtype/1.html
+	// 列表区为空，detailHints 通用末路 /{目录}/{数字}.html 把导航里的 /vodtype/124.html
+	// 当成详情链接扒走，指纹拿不到真详情/播放样本。校验：地址路径落在分类族
+	// （categoryHints 词表）且页面里找不到播放链接形态 → 判为抓错，换候选重试。
+	detailAddress, detailBody = settleDetailPage(ctx, fetcher, siteURL, detailAddress, home)
+	if detailBody != "" {
+		// 详情页给 1.3 倍预算：分集/线路容器在页面中后部，24000 截断会把
+		// 第 2、3 条线路容器切掉，指纹多线路计数就错了。
+		samples = append(samples, ai.Sample{Label: "详情页 " + detailAddress, Content: clipHTML(detailBody, int(float64(limit)*1.3))})
 	}
 	// 首页直挂播放链接（zmwgy.net 式 MacCMS：首页只有 /voddetail/ 与 /vodplay/，
 	// 详情路径形态可能没进 detailHints 或详情抓取失败）：兜底样本别丢。
 	if directPlay == "" {
 		if play := pickFirstHref(home, playHints); play != "" {
 			directPlay = xbpq.Absolute(siteURL+"/", play)
-		}
-	}
-	if detailAddress != "" {
-		if body, err := fetcher.Get(ctx, detailAddress, siteURL+"/"); err == nil {
-			detailBody = body
-			// 详情页给 1.3 倍预算：分集/线路容器在页面中后部，24000 截断会把
-			// 第 2、3 条线路容器切掉，指纹多线路计数就错了。
-			samples = append(samples, ai.Sample{Label: "详情页 " + detailAddress, Content: clipHTML(body, int(float64(limit)*1.3))})
 		}
 	}
 	// 「详情url」模板样本：给出由真实详情页地址实测反推的 详情url 模板。
@@ -134,6 +131,66 @@ func scanUnmatchedPlayHref(body string) string {
 		}
 	}
 	return ""
+}
+
+// looksLikeDetailPage 判断一份页面正文是否"真详情页"：核心不变式——真实详情页必有
+// 可识别的播放链接（playHints：/vodplay/、/play/、/play- 等）。被 detailHints 通用末路
+// 误抓回来的分类页（555yx.vip 的 /vodtype/124.html）列表区只有 0 个播放链接、
+// 满屏是 /voddetail/ 条目链接，据此能稳定区分。
+func looksLikeDetailPage(body string) bool {
+	return pickFirstHref(body, playHints) != ""
+}
+
+// detailHrefCandidates 从正文按文档顺序收集 detailHints 命中的链接（去重、限量）。
+// pickFirstHref 只回第一条——首页第一条常是导航里恰好 3 位数字的分类链
+// （/vodtype/126.html），真实详情链（/voddetail/792246.html）在后面，要能继续挑。
+func detailHrefCandidates(body string, limit int) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range hrefExtractPattern.FindAllStringSubmatch(body, 800) {
+		value := strings.TrimSpace(m[1])
+		if value == "" || !detailHints.MatchString(value) || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// settleDetailPage 校验链式探测扒到的详情页；不合格时依次用分类页正文与首页正文里
+// 的其他 detailHints 候选重试，取第一份"像详情页"（含播放链接）的正文。
+// 全部候选都不合格时返回原地址与空正文（让后续 directPlay 兜底与播放页提示接管）。
+func settleDetailPage(ctx context.Context, fetcher *xbpq.Fetcher, siteURL, address string, bodies ...string) (string, string) {
+	if strings.TrimSpace(address) == "" {
+		return "", ""
+	}
+	tried := map[string]bool{}
+	candidates := []string{address}
+	for _, body := range bodies {
+		for _, href := range detailHrefCandidates(body, 6) {
+			candidates = append(candidates, xbpq.Absolute(siteURL+"/", href))
+		}
+	}
+	var lastAddress string
+	for _, candidate := range candidates {
+		if candidate == "" || tried[candidate] || categoryHints.MatchString(candidate) {
+			continue
+		}
+		tried[candidate] = true
+		body, err := fetcher.Get(ctx, candidate, siteURL+"/")
+		if err != nil || body == "" {
+			continue
+		}
+		if looksLikeDetailPage(body) {
+			return candidate, body
+		}
+		lastAddress = candidate
+	}
+	return lastAddress, ""
 }
 
 // fetchPlay 真抓播放页并追加样本；播放页是关键证据，给 1.5 倍预算。返回是否成功抓到。
@@ -216,7 +273,9 @@ func detailURLSample(detailAddress string) ai.Sample {
 
 var (
 	// show 是很多站的「筛选页」而非分类页，放最后并在详情规则里排除。
-	categoryHints = regexp.MustCompile(`(?i)/(?:type|list|vodtype|fenlei|category|show)/[\w./-]*[0-9a-z]`)
+	// vodshow：苹果CMS mxone 皮肤（555yx.vip 式）导航分类链直接是 /vodshow/{id}---…---.html
+	// （锚文本常是"更多"被候选提取排除），categoryHints 不收它 → 分页锚点退到空栏目 vodtype 页。
+	categoryHints = regexp.MustCompile(`(?i)/(?:type|list|vodtype|vodshow|fenlei|category|show)/[\w./-]*[0-9a-z]`)
 	// 详情页路径第二段必然是数字（/vod/55569.html、/detail/138557/）。
 	// vod 前缀可选：MacCMS 命名是 /voddetail/120200.html（zmwgy.net 式），
 	// 旧写法 /(?:vod|detail)/ 要求斜杠紧跟 vod，/voddetail/ 整段不匹配 → 详情环节断链。
