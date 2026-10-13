@@ -2,21 +2,27 @@ package ai
 
 import "strings"
 
-// 规则生成的两种版本：
+// 规则生成的三种版本：
 //   - RuleVersionSimple（简写版，默认）：命中内置模板家族且皮肤吻合的字段直接省略，交给模板兜底，只写必须字段。
 //   - RuleVersionFull（完整版）：不依赖模板兜底，把该站采集链路用到的字段全部按样本真实 HTML 显式写全，
 //     产出的规则脱离内置模板也能独立运行。
+//   - RuleVersionExpert（专家写源版）：在完整版「字段全部显式写全」的基础上，产出后由服务端把每个
+//     pattern 拿去真实样本上逐字段实测（截取、取值、切集数），失败字段的实测证据回喂再修，
+//     逐个调试验证通过后才输出——让 guoapp3 的 xbpq 模块能直接识别播放。
 const (
 	RuleVersionSimple = "simple"
 	RuleVersionFull   = "full"
+	RuleVersionExpert = "expert"
 )
 
-// NormalizeRuleVersion 把外部（前端/CLI）传来的版本串归一到 RuleVersionSimple / RuleVersionFull。
+// NormalizeRuleVersion 把外部（前端/CLI）传来的版本串归一到 RuleVersionSimple / RuleVersionFull / RuleVersionExpert。
 // 空值、无法识别的值一律回落到简写版（与历史默认行为一致）。
 func NormalizeRuleVersion(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "full", "完整版", "完整", "完整规则", "quan", "quanbu":
 		return RuleVersionFull
+	case "expert", "专家", "专家写源", "专家版", "zj", "zhuojia":
+		return RuleVersionExpert
 	default:
 		return RuleVersionSimple
 	}
@@ -24,15 +30,29 @@ func NormalizeRuleVersion(value string) string {
 
 // ruleVersionLabel 返回给人类看的版本名。
 func ruleVersionLabel(version string) string {
-	if NormalizeRuleVersion(version) == RuleVersionFull {
+	switch NormalizeRuleVersion(version) {
+	case RuleVersionFull:
 		return "完整版"
+	case RuleVersionExpert:
+		return "专家版"
+	default:
+		return "简写版"
 	}
-	return "简写版"
 }
 
-// ruleVersionGenerateDirective 生成阶段注入的版本指令（完整版与简写版互斥）。
+// ruleVersionGenerateDirective 生成阶段注入的版本指令（完整版/专家版都要求字段显式写全，简写版靠模板兜底）。
 func ruleVersionGenerateDirective(version string) string {
-	if NormalizeRuleVersion(version) == RuleVersionFull {
+	switch NormalizeRuleVersion(version) {
+	case RuleVersionFull, RuleVersionExpert:
+		if NormalizeRuleVersion(version) == RuleVersionExpert {
+			return "【本次输出：专家写源版——字段全部显式写全，且每个 pattern 必须能通过服务端逐字段实测】\n" +
+				"1. 与完整版相同：禁止因为「模板能兜底」就省略字段，指纹「可省略字段清单」里的字段也逐个按样本真实 HTML 显式写出（「写了必坏」例外除外）；主页url 必写。\n" +
+				"2. 比完整版更严：写完后服务端会把 数组/标题/链接/列表图片/副标题/播放数组/线路数组/播放列表/播放标题/播放链接 等每个字段\n" +
+				"   拿去真实页面样本上逐一执行截取——截不出值、取值是裸 ID、切集数对不上页面条目数的字段会被打回，附上实测证据要求重写。\n" +
+				"   所以每条 pattern 都必须来自样本/指纹里逐字真实存在的锚点，先在心里用样本验一遍再写；不确定的宁可在 reason 里说明，不要赌模板默认值。\n" +
+				"3. 三条实测铁律（{catePg}、{cateId}、分类 ID）与「pattern 来自真实 HTML」的要求只高不低，一律照上文执行；写了 详情url 就逐字照抄「详情url 模板」实测模板。\n" +
+				"4. 【例外】「写了必坏」的字段别写：player_aaaa 站不写 跳转播放链接（见陷阱10）、单线路站不写 线路数组（见陷阱7）、站点没有的形态不为凑字数硬造。\n"
+		}
 		return "【本次输出：完整版——不靠模板兜底，字段全部显式写全】\n" +
 			"1. 与简写版相反：禁止因为「模板能兜底」就省略字段。指纹「可省略字段清单」里列出的那些字段（数组/标题/链接/图片/副标题/简介/播放数组/播放标题/播放链接/跳转播放链接/搜索url 等），" +
 			"本版本要【逐个按样本或指纹里的真实 HTML 显式写出来】（第 6 条列出的「写了必坏」例外除外），让规则即使换到没有内置模板的 jar 上也能独立工作。\n" +
@@ -44,22 +64,28 @@ func ruleVersionGenerateDirective(version string) string {
 			"5. 皮肤不符 / 未命中模板的字段本就是简写版也要写的，完整版同样写；不要为了省事把某字段留空或省略。\n" +
 			"6. 【例外】「写了必坏」的字段两版都别写：player_aaaa 站不写 跳转播放链接（见陷阱10）、单线路站不写 线路数组（见陷阱7）、" +
 			"站点根本没有的形态（无筛选就不写 {year}/{area} 之类）不为凑字数硬造——完整版写的是【该站真实存在】的字段，不是全字典。\n"
+	default:
+		return "【本次输出：简写版——命中模板的字段可省略，交给引擎兜底】\n" +
+			"按上文「简写机制」：命中内置模板家族且皮肤吻合的字段直接省略，只写必须字段（分类url、分类、" +
+			"搜索url（模板没给时），以及与皮肤不符 / 模板截不到的字段）。\n" +
+			"⚠ 简写版也必须写 播放列表：真机 jar 没它默认按 # 切分集，stui/MacCMS 的 <li> 连排分集段内无 # → " +
+			"真机只剩 1 集（见陷阱 12），模板默认只对本地引擎有效，别省。\n"
 	}
-	return "【本次输出：简写版——命中模板的字段可省略，交给引擎兜底】\n" +
-		"按上文「简写机制」：命中内置模板家族且皮肤吻合的字段直接省略，只写必须字段（分类url、分类、" +
-		"搜索url（模板没给时），以及与皮肤不符 / 模板截不到的字段）。\n" +
-		"⚠ 简写版也必须写 播放列表：真机 jar 没它默认按 # 切分集，stui/MacCMS 的 <li> 连排分集段内无 # → " +
-		"真机只剩 1 集（见陷阱 12），模板默认只对本地引擎有效，别省。\n"
 }
 
 // ruleVersionFixRequirement 修复阶段针对版本的差异化要求（返回一条编号要求文本，不含编号）。
 func ruleVersionFixRequirement(version string) string {
-	if NormalizeRuleVersion(version) == RuleVersionFull {
+	switch NormalizeRuleVersion(version) {
+	case RuleVersionFull:
 		return "（本轮是完整版）保持【所有字段都显式写全】：修好的字段继续逐字写出，模板能兜底的字段也不要删回省略——完整版不允许退化成简写；" +
 			"缺哪个字段（含主页url）就按样本真实 HTML 补哪个，pattern 一律来自样本 / 指纹，禁止用模板默认值充数。\n"
+	case RuleVersionExpert:
+		return "（本轮是专家版）保持【所有字段都显式写全】且每个 pattern 必须能在真实样本上实测截出值：" +
+			"修好的字段继续逐字写出，不允许退化成简写；pattern 一律来自样本 / 指纹里逐字真实存在的锚点，改完后自问一遍「拿这个锚点在样本原文里跑 start&&end 能不能截出想要的值」，不能就别交。\n"
+	default:
+		return "（本轮是简写版）简写过度导致某字段截不到（模板默认与样本皮肤不符）：只把坏的那个字段按样本 HTML 逐字补写，" +
+			"其它可省字段继续省——不要退化成全字段堆砌。\n"
 	}
-	return "（本轮是简写版）简写过度导致某字段截不到（模板默认与样本皮肤不符）：只把坏的那个字段按样本 HTML 逐字补写，" +
-		"其它可省字段继续省——不要退化成全字段堆砌。\n"
 }
 
 // SystemPrompt 是规则生成的系统指令。
@@ -206,9 +232,11 @@ XBPQ jar 与本引擎都内置模板：按「分类url」形态识别站点家�
 # 工作流程
 0. 若消息里给出【站点指纹】：它是服务端从真实页面解析并核实过出现次数的锚点，
    pattern 一律逐字符照抄指纹（含空格引号），只有指纹没覆盖的字段才回样本里逐字复制。
-0a. 用户消息开头会指定【本次输出：简写版 / 完整版】：简写版按上面「简写机制」省略靠模板兜底的字段；
+0a. 用户消息开头会指定【本次输出：简写版 / 完整版 / 专家写源版】：简写版按上面「简写机制」省略靠模板兜底的字段；
    完整版不省略——指纹「可省略清单」里的字段也逐个显式写出（pattern 仍必须来自真实 HTML，
-   且"写了必坏"的例外照旧：player_aaaa 站不写 跳转播放链接、单线路站不写 线路数组）。
+   且"写了必坏"的例外照旧：player_aaaa 站不写 跳转播放链接、单线路站不写 线路数组）；
+   专家写源版在完整版要求之上，每个 pattern 还会被服务端拿去真实样本逐字段实测截值，截不出值会被打回重写，
+   所以必须先在样本里人工核对一遍锚点边界再写。
 1. 先看「模板与简写」块：命中家族且皮肤吻合 → 只写必须字段，其余按可省略清单省略（完整版除外）；
    未命中/皮肤不符 → 全字段按样本写。
 2. 分类字段与 {cateId} 位置以指纹「分类检测」实测结论为准（简写铁律 c）：已实测分类串逐字取用，
@@ -242,9 +270,9 @@ func BuildGenerateMessages(siteURL string, samples []Sample, notes, siteFingerpr
 	builder.WriteString("详情url 不是硬性必写字段——简写版可省略交给兜底；但一旦写它（完整版应写），形态必须逐字照抄该实测模板（{id} 占位），禁止改形态。\n\n")
 	if fp := strings.TrimSpace(siteFingerprint); fp != "" {
 		builder.WriteString(fp + "\n\n")
-		if NormalizeRuleVersion(version) == RuleVersionFull {
+		if NormalizeRuleVersion(version) != RuleVersionSimple {
 			builder.WriteString("请优先按上面的站点指纹写 pattern，样本仅作指纹未覆盖字段的补充参考。" +
-				"本轮是【完整版】：指纹里标「可省略」的字段也要按指纹/样本的真实 HTML 显式写出（省略清单仅作「这些字段模板本来会兜底」的说明，本版不靠兜底），" +
+				"本轮是【" + ruleVersionLabel(version) + "】：指纹里标「可省略」的字段也要按指纹/样本的真实 HTML 显式写出（省略清单仅作「这些字段模板本来会兜底」的说明，本版不靠兜底），" +
 				"但逐字形态一律以指纹实测锚点为准，指纹没覆盖的字段回样本复制。\n")
 		} else {
 			builder.WriteString("请优先按上面的站点指纹写 pattern，样本仅作指纹未覆盖字段的补充参考；指纹标了可省略且与皮肤吻合的字段直接省略，交给引擎模板兜底。\n")
@@ -310,4 +338,51 @@ func BuildFixMessages(siteURL, ruleJSON string, problems []string, samples []Sam
 type Sample struct {
 	Label   string `json:"label"`
 	Content string `json:"content"`
+}
+
+// ExpertIssue 是专家写源里一条「字段实测未通过」的证据。
+// 定义在 ai 包里，避免 prompt 反向依赖上层 expert 包。
+type ExpertIssue struct {
+	Field   string `json:"field"`
+	Problem string `json:"problem"`
+}
+
+// BuildExpertAuditMessages 构造专家写源的逐字段实测反馈消息：
+// 服务端把上一版规则的每个字段拿去真实样本上逐一执行截取，未通过实测的字段连同
+// 实测证据（截了几段、取出的值长什么样）一起回喂，要求只修坏字段、逐字段验证后才输出。
+func BuildExpertAuditMessages(siteURL, ruleJSON string, issues []ExpertIssue, samples []Sample, notes, siteFingerprint string) []Message {
+	var builder strings.Builder
+	builder.WriteString("目标站点：" + siteURL + "\n\n")
+	builder.WriteString("本轮是【专家写源】：服务端已经把上一版规则的每个字段拿到真实页面样本上逐一执行截取实测（不是格式检查，是真的跑了一遍引擎）。")
+	builder.WriteString("下面列出的字段【没有通过实测】。请逐条对照实测证据重写这些字段的 pattern——先在样本原文里人工模拟一遍 start&&end 截取、确认能截出期望的值，再写进规则；禁止照抄模板默认值或凭印象改写 HTML。\n\n")
+	builder.WriteString("上一版规则：\n" + ruleJSON + "\n\n")
+	builder.WriteString("实测未通过的字段与证据：\n")
+	for _, issue := range issues {
+		builder.WriteString("- 字段「" + issue.Field + "」：" + issue.Problem + "\n")
+	}
+	if note := strings.TrimSpace(notes); note != "" {
+		builder.WriteString("\n用户补充说明（优先采纳）：\n" + note + "\n")
+	}
+	if fp := strings.TrimSpace(siteFingerprint); fp != "" {
+		builder.WriteString("\n" + fp + "\n")
+	}
+	builder.WriteString("\n修复要求：\n")
+	builder.WriteString("1. 只改上面实测失败的字段；已通过实测的字段一律原样保留，一个都不能丢、不能顺手改写。\n")
+	builder.WriteString("2. 每条新 pattern 的锚点必须是下方「页面样本」里逐字真实存在的字符串（含空格与引号），并按样本里条目的真实结构确定边界：数组只管框住一个完整条目，href/title/src 留给 标题/链接/列表图片 各自截取（陷阱 6/9）。\n")
+	builder.WriteString("3. 截出的值若是裸 ID、被吞进相邻标签、或整段为空，说明锚点边界选错——换锚点，不要微调大小写或加通配符赌一把。\n")
+	builder.WriteString("4. 播放链失败时对照详情页样本重验：播放数组 框分集容器（锚点不带闭合 >），播放列表 是分集之间真实存在的分隔串（<li> 结构写 </li>），播放标题/播放链接 在每个分集段内都能截出值。\n")
+	builder.WriteString("5. 输出修正后的【完整】规则 JSON：只输出 JSON，不要解释、不要代码块。\n")
+	if len(samples) > 0 {
+		builder.WriteString("\n页面样本（逐字段实测就是拿这些原文跑的，改 pattern 前先在下面找到逐字锚点）：\n")
+		for _, sample := range samples {
+			builder.WriteString("\n===== 样本：" + sample.Label + " =====\n")
+			builder.WriteString(sample.Content)
+			builder.WriteString("\n")
+		}
+	}
+	builder.WriteString("\n请输出修正后的完整规则 JSON（只输出 JSON）：")
+	return []Message{
+		{Role: "system", Content: SystemPrompt},
+		{Role: "user", Content: builder.String()},
+	}
 }

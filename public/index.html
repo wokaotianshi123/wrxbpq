@@ -35,6 +35,7 @@
         <select id="ruleVersion">
           <option value="simple">简写版（模板兜底，字段精简）</option>
           <option value="full">完整版（字段全部显式写全）</option>
+          <option value="expert">专家写源（逐字段推敲 + 实测验证后才输出）</option>
         </select>
       </label>
       <button id="btnGenerate">生成规则</button>
@@ -51,6 +52,7 @@
   <section class="card">
     <h2>3 · 规则 JSON</h2>
     <textarea id="rule" spellcheck="false" placeholder='{ "主页url": "https://..." }'></textarea>
+    <div id="expertOut" class="out hidden"></div>
     <div class="row">
       <label class="inline">搜索测试词<input id="keyword" type="text" value="爱" size="6"></label>
       <button id="btnVerify">开始验证</button>

@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/wrxbpq/wrxbpq/internal/ai"
+	"github.com/wrxbpq/wrxbpq/internal/expert"
 	"github.com/wrxbpq/wrxbpq/internal/fingerprint"
 	"github.com/wrxbpq/wrxbpq/internal/httpapi"
 	"github.com/wrxbpq/wrxbpq/internal/verify"
@@ -110,7 +112,7 @@ func runGenerate(args []string) error {
 	model := set.String("model", os.Getenv("AI_MODEL"), "模型名")
 	rule := set.String("rule", "", "已有规则（给了则进入修复模式）")
 	note := set.String("note", "", "给 AI 的补充说明（站点特性、期望字段等）")
-	version := set.String("version", "simple", "生成版本：simple=简写靠模板兜底 / full=完整版字段全部显式写全")
+	version := set.String("version", "simple", "生成版本：simple=简写靠模板兜底 / full=完整版字段全部显式写全 / expert=专家写源（逐字段实测验证后才输出）")
 	timeout := set.Int("timeout", 180, "AI 调用超时（秒）")
 	out := set.String("out", "", "规则输出文件（默认打印到标准输出）")
 	_ = set.Parse(args)
@@ -152,6 +154,18 @@ func runGenerate(args []string) error {
 	if _, ok := xbpq.ParseRule(payload); !ok {
 		fmt.Println(payload)
 		return fmt.Errorf("AI 产出无法识别为 XBPQ 规则")
+	}
+	if ai.NormalizeRuleVersion(*version) == ai.RuleVersionExpert {
+		fmt.Println("专家写源：逐字段实测（截取→取值→切集数），失败字段回喂 AI 再修…")
+		result := expert.Refine(context.Background(), ai.Config{BaseURL: *baseURL, APIKey: *apiKey, Model: *model, Timeout: *timeout},
+			*site, samples, *note, siteFingerprint, payload, 0)
+		payload = result.Rule
+		fmt.Print(result.Evidence)
+		if result.Clean {
+			fmt.Printf("✓ 全部字段实测通过（回喂再修 %d 轮）\n", result.Rounds)
+		} else {
+			fmt.Printf("△ 仍有字段未通过实测（已回喂 %d 轮，输出最优版，建议继续验证或手动修）\n", result.Rounds)
+		}
 	}
 	if *out != "" {
 		if err := os.WriteFile(*out, []byte(payload), 0o644); err != nil {

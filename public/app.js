@@ -109,6 +109,24 @@ function escapeHTML(value) {
   ));
 }
 
+// 专家写源：把逐字段实测报告（✓/✗ 每字段一行）展示在规则卡片下方。
+function showExpertLog(data) {
+  const box = $('expertOut');
+  if (!box) return;
+  if (data.version !== 'expert' || !data.expertLog) {
+    box.classList.add('hidden');
+    box.textContent = '';
+    return;
+  }
+  box.classList.remove('hidden');
+  const lines = data.expertLog.split('\n').filter((line) => line.trim());
+  box.innerHTML = '<div class="name">专家写源 · 逐字段实测报告</div>' +
+    lines.map((line) => {
+      const bad = line.startsWith('✗');
+      return `<div class="detail ${bad ? 'warn-text' : ''}" style="color:${bad ? 'var(--bad)' : 'var(--ok)'}">${escapeHTML(line)}</div>`;
+    }).join('');
+}
+
 // ---- 动作 ----
 
 async function probe() {
@@ -190,10 +208,16 @@ async function generate(isFix) {
     $('rule').value = data.rule;
     if (data.samples && data.samples.length) state.samples = data.samples;
     if (data.fingerprint) state.fingerprint = data.fingerprint;
-    const versionTag = data.version === 'full' ? '完整版' : '简写版';
+    const versionTag = data.version === 'full' ? '完整版' : (data.version === 'expert' ? '专家版' : '简写版');
     let done = isFix ? `已修复规则（${versionTag}，请重新验证）` : `已生成${versionTag}规则`;
     if (data.templateHit) done += ` — 命中模板：${data.templateHit}`;
+    if (data.version === 'expert') {
+      done += data.expertClean
+        ? ` — 逐字段实测全部通过（回喂 ${data.expertRounds || 0} 轮）`
+        : ` — 仍有字段未通过实测（回喂 ${data.expertRounds || 0} 轮，已输出最优版）`;
+    }
     $('genStatus').textContent = done;
+    showExpertLog(data);
     state.problems = [];
     $('btnFix').disabled = true;
   } catch (error) {

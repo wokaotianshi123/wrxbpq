@@ -3,13 +3,16 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/wrxbpq/wrxbpq/internal/ai"
+	"github.com/wrxbpq/wrxbpq/internal/expert"
 	"github.com/wrxbpq/wrxbpq/internal/fingerprint"
 	"github.com/wrxbpq/wrxbpq/internal/verify"
 	"github.com/wrxbpq/wrxbpq/internal/xbpq"
@@ -70,28 +73,37 @@ func HandleProbe(w http.ResponseWriter, r *http.Request) {
 // ---- /api/generate ----
 
 type generateRequest struct {
-	Site     string      `json:"site"`
-	Rule     string      `json:"rule"`
-	Problems []string    `json:"problems"`
-	Notes    string      `json:"notes"`
-	Samples  []ai.Sample `json:"samples"`
-	Version  string      `json:"version"` // "simple"=简写版（默认） "full"=完整版（字段全部显式写全，不靠模板兜底）
-	BaseURL  string      `json:"baseUrl"`
-	APIKey   string      `json:"apiKey"`
-	Model    string      `json:"model"`
-	Timeout  int         `json:"timeout"`
+	Site      string      `json:"site"`
+	Rule      string      `json:"rule"`
+	Problems  []string    `json:"problems"`
+	Notes     string      `json:"notes"`
+	Samples   []ai.Sample `json:"samples"`
+	Version   string      `json:"version"` // "simple"=简写版（默认） "full"=完整版（字段全部显式写全，不靠模板兜底） "expert"=专家写源（逐字段实测验证后才输出）
+	MaxRounds int         `json:"maxRounds"`
+	BaseURL   string      `json:"baseUrl"`
+	APIKey    string      `json:"apiKey"`
+	Model     string      `json:"model"`
+	Timeout   int         `json:"timeout"`
 }
 
 type generateResponse struct {
-	OK          bool        `json:"ok"`
-	Rule        string      `json:"rule,omitempty"`
-	Raw         string      `json:"raw,omitempty"`
-	Error       string      `json:"error,omitempty"`
-	Samples     []ai.Sample `json:"samples,omitempty"`
-	Fingerprint string      `json:"fingerprint,omitempty"`
-	TemplateHit string      `json:"templateHit,omitempty"`
-	Version     string      `json:"version,omitempty"` // 回显本次实际使用的版本（simple/full）
+	OK           bool        `json:"ok"`
+	Rule         string      `json:"rule,omitempty"`
+	Raw          string      `json:"raw,omitempty"`
+	Error        string      `json:"error,omitempty"`
+	Samples      []ai.Sample `json:"samples,omitempty"`
+	Fingerprint  string      `json:"fingerprint,omitempty"`
+	TemplateHit  string      `json:"templateHit,omitempty"`
+	Version      string      `json:"version,omitempty"`      // 回显本次实际使用的版本（simple/full/expert）
+	ExpertRounds int         `json:"expertRounds,omitempty"` // 专家模式实际执行的逐字段实测回喂轮数
+	ExpertClean  bool        `json:"expertClean,omitempty"`  // 专家模式：最终规则是否全部字段实测通过
+	ExpertLog    string      `json:"expertLog,omitempty"`    // 专家模式：最后一轮逐字段实测报告（✓/✗ 每字段一行）
 }
+
+// expertBudget 是专家写源整个 handler 的时间预算：
+// 前端 fetch 290 秒放弃、Vercel 函数 300 秒硬掐，留 270 秒给「生成+修复+逐字段实测回喂」，
+// 超时前 Refine 会带着最优候选提前收工，不让用户拿不到任何结果。
+const expertBudget = 270 * time.Second
 
 // HandleGenerate 调 AI 生成（或修复）规则。
 func HandleGenerate(w http.ResponseWriter, r *http.Request) {
@@ -170,14 +182,33 @@ func HandleGenerate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// 专家写源：把候选规则逐字段拿去真实样本上实测截值，失败证据回喂再修，
+	// 全部实测通过（或轮数/时间用尽后的最优版）才作为最终输出。
+	var (
+		expertRounds int
+		expertClean  bool
+		expertLog    string
+	)
+	if ruleVersion == ai.RuleVersionExpert {
+		ctx, cancel := context.WithTimeout(r.Context(), expertBudget)
+		defer cancel()
+		result := expert.Refine(ctx, cfg, request.Site, samples, request.Notes, siteFingerprint, rule, request.MaxRounds)
+		rule = result.Rule
+		expertRounds = result.Rounds
+		expertClean = result.Clean
+		expertLog = result.Evidence
+	}
 	writeJSON(w, http.StatusOK, generateResponse{
-		OK:          true,
-		Rule:        rule,
-		Raw:         content,
-		Samples:     samples,
-		Fingerprint: siteFingerprint,
-		TemplateHit: templateHitNames(rule),
-		Version:     ruleVersion,
+		OK:           true,
+		Rule:         rule,
+		Raw:          content,
+		Samples:      samples,
+		Fingerprint:  siteFingerprint,
+		TemplateHit:  templateHitNames(rule),
+		Version:      ruleVersion,
+		ExpertRounds: expertRounds,
+		ExpertClean:  expertClean,
+		ExpertLog:    expertLog,
 	})
 }
 

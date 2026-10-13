@@ -5,13 +5,19 @@ import (
 	"testing"
 )
 
-// TestNormalizeRuleVersion 版本串归一：完整版认 full/中文变体，其它一律回简写版（历史默认）。
+// TestNormalizeRuleVersion 版本串归一：完整版认 full/中文变体、专家版认 expert/中文变体，其它一律回简写版（历史默认）。
 func TestNormalizeRuleVersion(t *testing.T) {
 	full := []string{"full", "FULL", "  full  ", "完整版", "完整", "完整规则"}
+	expert := []string{"expert", "EXPERT", "  expert  ", "专家", "专家写源", "专家版"}
 	simple := []string{"", "simple", "SIMPLE", "简写版", "随便什么", "  "}
 	for _, value := range full {
 		if got := NormalizeRuleVersion(value); got != RuleVersionFull {
 			t.Errorf("NormalizeRuleVersion(%q) = %q, 期望 %q", value, got, RuleVersionFull)
+		}
+	}
+	for _, value := range expert {
+		if got := NormalizeRuleVersion(value); got != RuleVersionExpert {
+			t.Errorf("NormalizeRuleVersion(%q) = %q, 期望 %q", value, got, RuleVersionExpert)
 		}
 	}
 	for _, value := range simple {
@@ -74,5 +80,37 @@ func TestFixMessagesVersionRequirement(t *testing.T) {
 	}
 	if strings.Contains(simpleUser, "不允许退化成简写") {
 		t.Errorf("简写版修复消息误注入完整版要求")
+	}
+}
+
+// TestGenerateMessagesExpertVersion 专家版：走「显式写全 + 逐字段实测」指令，不残留简写话术。
+func TestGenerateMessagesExpertVersion(t *testing.T) {
+	samples := []Sample{{Label: "首页", Content: "<html>...</html>"}}
+	fp := "命中模板家族：MacCMS\n可省略字段：数组、标题、链接"
+	messages := BuildGenerateMessages("https://demo.com", samples, "", fp, RuleVersionExpert)
+	user := messages[len(messages)-1].Content
+	for _, want := range []string{"专家写源版", "逐字段实测", "显式写出"} {
+		if !strings.Contains(user, want) {
+			t.Errorf("专家版生成消息缺少指令片段 %q", want)
+		}
+	}
+	if strings.Contains(user, "直接省略，交给引擎模板兜底") {
+		t.Errorf("专家版生成消息残留简写话术：直接省略交给兜底")
+	}
+}
+
+// TestExpertAuditMessagesCarryEvidence 逐字段实测反馈消息必须带失败字段证据、上一版规则与样本原文。
+func TestExpertAuditMessagesCarryEvidence(t *testing.T) {
+	samples := []Sample{{Label: "分类页 https://demo.com", Content: "<li><a href=\"/d/1.html\">x</a></li>"}}
+	issues := []ExpertIssue{{Field: "标题", Problem: "截不出值"}}
+	messages := BuildExpertAuditMessages("https://demo.com", `{"标题":"a=\"&&\""}`, issues, samples, "补充", "指纹文本")
+	user := messages[len(messages)-1].Content
+	for _, want := range []string{"字段「标题」：截不出值", "上一版规则", "补充", "指纹文本", "样本：分类页"} {
+		if !strings.Contains(user, want) {
+			t.Errorf("专家实测反馈消息缺少片段 %q", want)
+		}
+	}
+	if messages[0].Role != "system" || messages[0].Content != SystemPrompt {
+		t.Error("专家实测反馈消息应复用规则生成系统指令")
 	}
 }
