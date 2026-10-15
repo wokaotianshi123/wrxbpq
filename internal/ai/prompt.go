@@ -386,3 +386,59 @@ func BuildExpertAuditMessages(siteURL, ruleJSON string, issues []ExpertIssue, sa
 		{Role: "user", Content: builder.String()},
 	}
 }
+
+// clipFieldValue 裁剪字段当前值，避免超长 pattern 把纠正 prompt 撑爆。
+func clipFieldValue(value string) string {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if len(runes) <= 200 {
+		return value
+	}
+	return string(runes[:200]) + "…"
+}
+
+// BuildFieldFixMessages 构造「单个字段 AI 纠正」的消息。
+//
+// 用途：写源界面逐字段填空时，每个字段内容后都有一个「AI 纠正」按钮。用户点它时，
+// 前端把该字段名、当前填入的值、服务端实测出来的问题（截不出值 / 取到裸 ID /
+// 起始锚点一字未现 / 多线路没写线路数组 …）连同相关页面样本与站点指纹发来，
+// 要求 AI 拿网页源码对该字段核实并纠正。
+//
+// 关键约束：只处理这一个字段，其它字段原样带回。输出仍然是【完整规则 JSON】
+//（前端只取回被纠正的那个字段覆盖），这样模型不必学新输出格式，
+// 也不会顺手改坏已经逐字段验证通过的其它字段。
+func BuildFieldFixMessages(siteURL, fieldName, currentValue, problem string, samples []Sample, notes, siteFingerprint string) []Message {
+	var builder strings.Builder
+	builder.WriteString("目标站点：" + siteURL + "\n\n")
+	builder.WriteString("本轮是【单字段纠正】：只处理字段「" + fieldName + "」，其它字段一律原样输出、一个字都不许改。\n\n")
+	builder.WriteString("该字段当前值：" + clipFieldValue(currentValue) + "\n")
+	if strings.TrimSpace(problem) != "" {
+		builder.WriteString("服务端在真实页面样本上实测出的问题：" + problem + "\n")
+	}
+	builder.WriteString("\n纠正步骤（请严格按顺序执行，必须结合下方网页源码，不要凭空编）：\n")
+	builder.WriteString("1. 先判断这个字段属于哪一层，再去对应「标签」的样本里找真实 HTML：列表层（数组/二次截取/标题/链接/列表图片/副标题/搜索数组/搜索标题/搜索链接）看「分类页」样本；详情层（影片名称/简介/封面/类型/导演/主演/播放数组/线路数组/播放列表/播放标题/播放链接）看「详情页」样本；直链层（跳转播放链接）看「播放页」样本；URL 字段看服务端真实抓取的结论。\n")
+	builder.WriteString("2. 在样本原文里【逐字复制】真实存在的字符串当锚点（含空格与引号，不改属性顺序、不删空格）。绝对不要自己编造或改写锚点——锚点必须能在样本里 Ctrl+F 搜到。\n")
+	builder.WriteString("3. 在心里用样本跑一遍 start&&end：确认截出来的正是你要的「标题 / 链接 / 图片 / 分集」，而不是空串、裸数字 ID、脚本碎片、整段 HTML 或被相邻标签吞进去的片段。URL 字段则确认占位符正确（{cateId}/{catePg}/{id}/{wd}）且模板完整可拼接。\n")
+	builder.WriteString("4. 这是【失败修正】场景：该字段已经服务端在「真实页面源码」上实测，结论是「不通过」，且原因已在上面给出。所以默认必须给出修正值，绝不能为了「看起来有改动」或图省事而把原值原样写回——原值写回只会让验证再次标红。\n")
+	builder.WriteString("5. 只有当你能用该字段的截取语法在下方样本上【真正跑出正确结果】（非空、非裸 ID、非脚本碎片）时，才可以保留原值；否则必须给出新的、经样本验证的写法。\n")
+	builder.WriteString("6. 输出要求：只输出一个 JSON 对象，不要 Markdown 代码块、不要解释文字；键是中文 XBPQ 字段名、值是字符串；除「" + fieldName + "」以外的字段全部沿用当前值原样输出（可以只写这一个字段，前端会与现有规则合并）。\n")
+	if note := strings.TrimSpace(notes); note != "" {
+		builder.WriteString("\n用户补充说明（优先采纳）：\n" + note + "\n")
+	}
+	if fp := strings.TrimSpace(siteFingerprint); fp != "" {
+		builder.WriteString("\n" + fp + "\n")
+	}
+	if len(samples) > 0 {
+		builder.WriteString("\n页面样本（改 pattern 前先在下面找到逐字锚点）：\n")
+		for _, sample := range samples {
+			builder.WriteString("\n===== 样本：" + sample.Label + " =====\n")
+			builder.WriteString(sample.Content)
+			builder.WriteString("\n")
+		}
+	}
+	builder.WriteString("\n请输出纠正后的规则 JSON（只输出 JSON）：")
+	return []Message{
+		{Role: "system", Content: SystemPrompt},
+		{Role: "user", Content: builder.String()},
+	}
+}

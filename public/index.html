@@ -49,8 +49,27 @@
     <p class="hint">兼容任何提供 /v1/chat/completions 的服务：OpenAI、DeepSeek、通义、月之暗面、Groq、OpenRouter、One-API、本地 Ollama 等。</p>
   </section>
 
+  <section class="card" id="fieldCard">
+    <h2>3 · 逐字段写源（完整版字段表格）</h2>
+    <div class="row">
+      <button id="btnLoadDict" class="ghost">载入字段表格</button>
+      <button id="btnSyncRule" class="ghost">把规则 JSON 载入表格</button>
+      <button id="btnValidateAll" class="ghost">整表验证</button>
+      <button id="btnGenJSON" class="ghost">按字段生成源 JSON</button>
+      <span id="fieldStatus" class="status"></span>
+    </div>
+    <p class="hint">抓取样本后载入字段表格，逐字段填空；每个字段右侧「验证」会拿网页抓取实测该字段，「AI纠正」让 AI 按页面源码核实重写这一个字段。出错字段整表验证后标红。</p>
+    <div id="tplWrap" class="hidden">
+      <label class="inline" style="margin-top:8px">简写版·临时模板（改这里不影响模板固定格式；与默认不同的字段才会写进生成的 JSON）
+        <span id="tplHit" class="hint"></span>
+      </label>
+      <textarea id="tplOverride" spellcheck="false" rows="4" placeholder='命中模板后自动预填；未命中模板时留空'></textarea>
+    </div>
+    <div id="fieldTable" class="ftable hidden"></div>
+  </section>
+
   <section class="card">
-    <h2>3 · 规则 JSON</h2>
+    <h2>4 · 规则 JSON</h2>
     <textarea id="rule" spellcheck="false" placeholder='{ "主页url": "https://..." }'></textarea>
     <div id="expertOut" class="out hidden"></div>
     <div class="row">
@@ -61,7 +80,7 @@
   </section>
 
   <section class="card">
-    <h2>4 · 验证结果</h2>
+    <h2>5 · 验证结果</h2>
     <div id="steps" class="steps"></div>
     <div class="row">
       <button id="btnCopy" class="ghost">复制规则</button>

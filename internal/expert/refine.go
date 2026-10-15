@@ -49,7 +49,9 @@ func Refine(ctx context.Context, cfg ai.Config, site string, samples []ai.Sample
 		}
 		rounds++
 		messages := ai.BuildExpertAuditMessages(site, rule, failures, samples, notes, fingerprintText)
-		content, err := ai.Chat(roundCfg, messages)
+		// 用外层 ctx（带 270 秒预算）发起：Chat 内部对 408/429/5xx 的退避重试
+		// 也受同一预算约束，慢模型多轮回喂不会把函数时长撞穿。
+		content, err := ai.ChatCtx(ctx, roundCfg, messages)
 		if err != nil {
 			break
 		}

@@ -148,6 +148,14 @@ var families = []templateFamily{
 // category 可以是带 {cateId} 占位的模板形态，也可以是真实数字 URL——
 // 指纹分析用它判断「哪些字段本站可简写」，规则解析用它补齐缺失字段。
 func MatchTemplate(category string) (string, map[string]string) {
+	return MatchTemplateWith(category, nil)
+}
+
+// MatchTemplateWith 在 MatchTemplate 基础上支持【临时覆盖】：
+// overrides 里的字段替换模板默认值（键可用别名，值空串=删掉该模板字段）。
+// 这是简写版「临时改模板再出 JSON」的底座——覆盖只作用于本次合并结果，
+// 不修改内置 families，模板固定格式不受任何影响。
+func MatchTemplateWith(category string, overrides map[string]string) (string, map[string]string) {
 	category = strings.TrimSpace(category)
 	if category == "" {
 		return "", nil
@@ -176,7 +184,32 @@ func MatchTemplate(category string) (string, map[string]string) {
 	if len(names) == 0 {
 		return "", nil
 	}
+	// 应用临时覆盖：别名归一后替换；空值删除该字段（让该字段回落到「必须显式填」）。
+	for key, value := range overrides {
+		norm := normalizeKey(CanonicalFieldName(key))
+		if norm == "" {
+			continue
+		}
+		if strings.TrimSpace(value) == "" {
+			delete(merged, norm)
+			continue
+		}
+		if strings.Contains(value, "{host}") && origin != "" {
+			value = strings.ReplaceAll(value, "{host}", origin)
+		}
+		merged[norm] = value
+	}
 	return strings.Join(names, "、"), merged
+}
+
+// DefaultTemplateFieldsJSON 返回某模板家族合并后的默认字段集 JSON 文本，
+// 供写源界面「模板字段」编辑区预填（不传 overrides 即内置固定格式）。
+func DefaultTemplateFieldsJSON(category string) string {
+	_, merged := MatchTemplate(category)
+	if merged == nil {
+		return "{}"
+	}
+	return GenerateJSON(merged)
 }
 
 // TemplateFieldNames 返回一份合并模板覆盖的字段名（排序后），供指纹块列举。
@@ -191,6 +224,12 @@ func TemplateFieldNames(fields map[string]string) []string {
 
 // applyTemplate 按 分类url 形态补齐缺失字段（不覆盖已写字段）。幂等。
 func (r *Rule) applyTemplate() {
+	r.applyTemplateWith(nil)
+}
+
+// applyTemplateWith 带【临时覆盖】的模板补齐：overrides 只影响本次补齐用的
+// 模板字段集（见 MatchTemplateWith），内置 families 固定格式不受任何影响。
+func (r *Rule) applyTemplateWith(overrides map[string]string) {
 	if r.fields == nil {
 		r.fields = map[string]string{}
 	}
@@ -199,7 +238,7 @@ func (r *Rule) applyTemplate() {
 	}
 	category := r.Field("分类url", "分类Url")
 	if category != "" {
-		if _, merged := MatchTemplate(category); merged != nil {
+		if _, merged := MatchTemplateWith(category, overrides); merged != nil {
 			for key, value := range merged {
 				if strings.TrimSpace(r.fields[key]) == "" {
 					r.fields[key] = value

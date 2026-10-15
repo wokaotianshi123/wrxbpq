@@ -31,6 +31,10 @@ func normalizeKey(key string) string {
 	return strings.NewReplacer(" ", "", "\t", "", "\n", "", "\r", "").Replace(key)
 }
 
+// NormalizeKey 把字段名归一到可比较的键（去空白、中文括号转方括号、去控制字符）。
+// 同时供其他包（如 httpapi）复用，避免重复实现 normalizeKey 逻辑。
+func NormalizeKey(key string) string { return normalizeKey(key) }
+
 func normalizeValue(value string) string {
 	value = strings.ReplaceAll(value, "〔", "[")
 	value = strings.ReplaceAll(value, "〕", "]")
@@ -159,11 +163,12 @@ func mergeLongText(head, embedded string) string {
 			headNode[key] = value
 		}
 	}
-	body, err := json.Marshal(headNode)
-	if err != nil {
+	// 关闭 HTML 转义，避免 &&、</ul> 等被转成 \u0026\u003c。
+	body := MarshalNoEscape(headNode)
+	if body == "" {
 		return head
 	}
-	return string(body)
+	return body
 }
 
 // Field 依次尝试多个字段名（含 XBPQ 常见别名）。

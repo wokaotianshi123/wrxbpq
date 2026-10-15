@@ -16,6 +16,16 @@ import (
 // DefaultUserAgent 未指定 UA 时的默认值。
 const DefaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
+// MobileUserAgent 是手机 UA 兜底值。大量国内采集站对桌面 UA 返回风控页/空壳，
+// 换手机 UA 常常能拿到真实 HTML（笔记与实测站（如 hanjuds 类 mobile 站）均如此），
+// 所以重试耗尽后会用它再试一次。
+const MobileUserAgent = "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36"
+
+// retryableStatus 判断该状态码是否值得重试：408 请求超时、429 限流、5xx 服务端错误。
+func retryableStatus(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
+}
+
 // maxBodyBytes 单页抓取上限，避免 OOM。
 const maxBodyBytes = 8 << 20
 
@@ -52,16 +62,69 @@ func (f *Fetcher) client() *http.Client {
 }
 
 // Get 抓取 URL 并返回解码后的文本。spec 支持 `url;post;body` 形态。
+// 带重试：408/429/5xx 与网络瞬时错误会退避重试，仍失败再换手机 UA 兜底一次。
 func (f *Fetcher) Get(ctx context.Context, spec, referer string) (string, error) {
 	address, method, body := splitSpec(spec)
 	if address == "" {
 		return "", fmt.Errorf("地址为空")
 	}
-	return f.do(ctx, address, method, body, referer)
+	return f.getWithRetry(ctx, address, method, body, referer, f.Agent)
 }
 
-func (f *Fetcher) do(ctx context.Context, address, method, body, referer string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(f.timeout())*time.Second)
+// getWithRetry 按 UA 维度做一轮取数：先用 f.Agent，遇到可重试错误退避重试，
+// 全部失败后若当前 UA 不是手机 UA，则换手机 UA 再来一轮（应对站点的桌面风控）。
+// 单次尝试的超时与整体 ctx 预算共同生效，重试不会把整体耗时拖到平台掐断。
+func (f *Fetcher) getWithRetry(ctx context.Context, address, method, body, referer, agent string) (string, error) {
+	const attempts = 3
+	backoff := []time.Duration{400 * time.Millisecond, 1200 * time.Millisecond}
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			if lastErr != nil {
+				return "", lastErr
+			}
+			return "", err
+		}
+		payload, status, err := f.doOnce(ctx, address, method, body, referer, agent)
+		if err == nil && retryableStatus(status) {
+			err = fmt.Errorf("HTTP %d", status)
+		}
+		if err == nil {
+			return payload, nil
+		}
+		lastErr = err
+		if status > 0 && !retryableStatus(status) {
+			// 4xx（如 404/403）重试没有意义，直接失败。
+			break
+		}
+		if attempt < len(backoff) {
+			select {
+			case <-ctx.Done():
+				return "", lastErr
+			case <-time.After(backoff[attempt]):
+			}
+		}
+	}
+	// 最后一招：换手机 UA 再试一轮。
+	if agent != MobileUserAgent && !strings.Contains(agent, "Mobile") {
+		return f.getWithRetry(ctx, address, method, body, referer, MobileUserAgent)
+	}
+	return "", lastErr
+}
+
+// doOnce 发起一次真实请求。agent 为空时用抓取器默认 UA。
+// 返回 (解码后的正文, HTTP 状态码, 错误)：状态码一并回传，由 getWithRetry 判断是否值得重试——
+// 单次尝试的独立超时按 timeout/2 收紧，保证「一次尝试 + 退避 + 换 UA 再一轮」
+// 总耗时仍能落在调用方的 ctx 预算内（Vercel 函数 300 秒硬掐）。
+func (f *Fetcher) doOnce(ctx context.Context, address, method, body, referer, agent string) (string, int, error) {
+	if strings.TrimSpace(agent) == "" {
+		agent = f.Agent
+	}
+	perTry := f.timeout() / 2
+	if perTry < 6 {
+		perTry = 6
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(perTry)*time.Second)
 	defer cancel()
 	var reader io.Reader
 	if body != "" {
@@ -69,11 +132,18 @@ func (f *Fetcher) do(ctx context.Context, address, method, body, referer string)
 	}
 	request, err := http.NewRequestWithContext(ctx, pickMethod(method), address, reader)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	request.Header.Set("User-Agent", f.Agent)
+	request.Header.Set("User-Agent", agent)
 	request.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	request.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	// 手机 UA 场景补上移动端常见头，部分站点据此下发移动版 HTML。
+	if strings.Contains(agent, "Mobile") {
+		request.Header.Set("Sec-Fetch-Dest", "document")
+		request.Header.Set("Sec-Fetch-Mode", "navigate")
+		request.Header.Set("Sec-Fetch-Site", "none")
+		request.Header.Set("Upgrade-Insecure-Requests", "1")
+	}
 	if referer != "" {
 		request.Header.Set("Referer", referer)
 	}
@@ -82,18 +152,19 @@ func (f *Fetcher) do(ctx context.Context, address, method, body, referer string)
 	}
 	response, err := f.client().Do(request)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 400 {
+		// 只吞掉少量正文便于排错，其余丢弃，避免风控大页占内存。
 		_, _ = io.CopyN(io.Discard, response.Body, 1024)
-		return "", fmt.Errorf("HTTP %d", response.StatusCode)
+		return "", response.StatusCode, fmt.Errorf("HTTP %d", response.StatusCode)
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, maxBodyBytes))
 	if err != nil {
-		return "", err
+		return "", response.StatusCode, err
 	}
-	return DecodeBody(string(payload)), nil
+	return DecodeBody(string(payload)), response.StatusCode, nil
 }
 
 func pickMethod(method string) string {

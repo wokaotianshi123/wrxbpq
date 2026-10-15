@@ -5,9 +5,11 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -117,9 +119,9 @@ func HandleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := ai.Config{
-		BaseURL: firstNonEmpty(request.BaseURL, os.Getenv("AI_BASE_URL")),
-		APIKey:  firstNonEmpty(request.APIKey, os.Getenv("AI_API_KEY")),
-		Model:   firstNonEmpty(request.Model, os.Getenv("AI_MODEL")),
+		BaseURL: xbpq.FirstNonEmpty(request.BaseURL, os.Getenv("AI_BASE_URL")),
+		APIKey:  xbpq.FirstNonEmpty(request.APIKey, os.Getenv("AI_API_KEY")),
+		Model:   xbpq.FirstNonEmpty(request.Model, os.Getenv("AI_MODEL")),
 		Timeout: request.Timeout,
 	}
 	if cfg.BaseURL == "" || cfg.Model == "" {
@@ -152,7 +154,7 @@ func HandleGenerate(w http.ResponseWriter, r *http.Request) {
 	} else {
 		messages = ai.BuildGenerateMessages(request.Site, samples, request.Notes, siteFingerprint, ruleVersion)
 	}
-	content, err := ai.Chat(cfg, messages)
+	content, err := ai.ChatCtx(r.Context(), cfg, messages)
 	if err != nil {
 		writeJSON(w, http.StatusOK, generateResponse{OK: false, Error: err.Error()})
 		return
@@ -174,7 +176,7 @@ func HandleGenerate(w http.ResponseWriter, r *http.Request) {
 			problems = append(problems, "字段「"+issue.Field+"」："+issue.Problem)
 		}
 		retryMessages := ai.BuildFixMessages(request.Site, rule, problems, samples, request.Notes, siteFingerprint, ruleVersion)
-		if retryContent, retryErr := ai.Chat(cfg, retryMessages); retryErr == nil {
+		if retryContent, retryErr := ai.ChatCtx(r.Context(), cfg, retryMessages); retryErr == nil {
 			if retried := ExtractRule(retryContent); retried != "" {
 				if _, retryOK := xbpq.ParseRule(retried); retryOK && len(fingerprint.Check(retried, samples)) < len(issues) {
 					rule = retried
@@ -198,6 +200,7 @@ func HandleGenerate(w http.ResponseWriter, r *http.Request) {
 		expertClean = result.Clean
 		expertLog = result.Evidence
 	}
+	rule = xbpq.SanitizeValue(rule)
 	writeJSON(w, http.StatusOK, generateResponse{
 		OK:           true,
 		Rule:         rule,
@@ -244,10 +247,87 @@ func ExtractRule(content string) string {
 	}
 	candidate := strings.TrimSpace(value[start : end+1])
 	candidate = trimTrailingComma(candidate)
-	return candidate
+	return xbpq.SanitizeValue(candidate)
 }
 
 var trailingCommaPattern = regexp.MustCompile(`,\s*([}\]])`)
+
+// extractFieldFromJSON 从 AI 返回的 JSON 文本里取出指定字段的值。
+//
+// 与 ParseRule 不同：它不要求规则整体合法（即不强制含 主页url/分类url 等锚点字段），
+// 因此 AI 只回「被纠正的那一个字段」时也能正确取到值。字段名按 xbpq.NormalizeKey 归一，
+// 并额外尝试该字段在字典里的全部别名（如「图片」↔「列表图片」↔「封面图」），
+// 兼容模型用别名输出的情形。返回前剔除乱码替换符，保证写出的源不含坏字符。
+func extractFieldFromJSON(text, fieldName string) string {
+	var decoded any
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		return ""
+	}
+	targets := map[string]bool{xbpq.NormalizeKey(fieldName): true}
+	if spec, ok := xbpq.LookupField(fieldName); ok {
+		targets[xbpq.NormalizeKey(spec.Name)] = true
+		for _, alias := range spec.Aliases {
+			targets[xbpq.NormalizeKey(alias)] = true
+		}
+	}
+	var found string
+	collect := func(node map[string]any) {
+		for key, value := range node {
+			if targets[xbpq.NormalizeKey(key)] {
+				if s := stringValueLocal(value); strings.TrimSpace(s) != "" && found == "" {
+					found = s
+				}
+			}
+		}
+	}
+	switch typed := decoded.(type) {
+	case map[string]any:
+		collect(typed)
+	case []any:
+		for _, entry := range typed {
+			if node, ok := entry.(map[string]any); ok {
+				collect(node)
+			}
+		}
+	}
+	return xbpq.SanitizeValue(found)
+}
+
+func stringValueLocal(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case float64:
+		return strconv.FormatFloat(typed, 'f', -1, 64)
+	case nil:
+		return ""
+	default:
+		return ""
+	}
+}
+
+// replaceFieldInRule 把规则 JSON 中某个字段替换为新值，返回新 JSON 文本。
+// 清掉会归一到同一规范名的别名键，避免重复键；保留其余字段，供服务端回验时依赖
+// （例如改「标题」时仍需要 数组 才能跑通条目段内截取）。
+func replaceFieldInRule(ruleJSON, field, value string) string {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(ruleJSON), &m); err != nil || m == nil {
+		m = map[string]any{}
+	}
+	canon := xbpq.CanonicalFieldName(field)
+	if spec, ok := xbpq.LookupField(field); ok {
+		for _, alias := range spec.Aliases {
+			delete(m, alias)
+		}
+	}
+	m[canon] = xbpq.SanitizeValue(value)
+	// 用关闭 HTML 转义的序列化，避免 &&、</ul> 等被转成 \u0026\u003c。
+	body := xbpq.MarshalNoEscape(m)
+	if body == "" {
+		return ruleJSON
+	}
+	return body
+}
 
 // trimTrailingComma 去掉 JSON 尾部多余逗号（模型输出里很常见）。
 func trimTrailingComma(text string) string {
@@ -260,13 +340,271 @@ func trimTrailingComma(text string) string {
 	}
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
+// ---- /api/fields & /api/check-field & /api/ai-fix-field ----
+
+// HandleFields 返回完整字段字典（按界面分组）+ 当前 分类url 命中的模板家族默认字段。
+// 写源界面的字段表格由它驱动；templateFields 用于「简写版临时改模板」编辑区预填。
+func HandleFields(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 POST"})
+		return
+	}
+	var request struct {
+		CategoryURL string `json:"categoryUrl"`
+	}
+	_ = readJSON(w, r, &request)
+	type group struct {
+		Name   string            `json:"name"`
+		Fields []xbpq.FieldSpec  `json:"fields"`
+	}
+	var groups []group
+	dict := xbpq.FieldDictionary()
+	for _, groupName := range xbpq.GroupOrder {
+		g := group{Name: groupName}
+		for _, spec := range dict {
+			if spec.Group == groupName {
+				g.Fields = append(g.Fields, spec)
+			}
+		}
+		if len(g.Fields) > 0 {
+			groups = append(groups, g)
 		}
 	}
-	return ""
+	response := map[string]any{
+		"ok":            true,
+		"groups":        groups,
+		"templateJSON":  xbpq.DefaultTemplateFieldsJSON(request.CategoryURL),
+	}
+	if name, _ := xbpq.MatchTemplate(request.CategoryURL); name != "" {
+		response["templateHit"] = name
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// HandleCheckField 单字段即时验证：前端每填完一个字段调用一次。
+// 简写版「临时改模板」时，前端把改过的模板字段直接作为显式字段拼进 rule 传来——
+// 显式字段会覆盖模板兜底，CheckFields 自然按显式声明实测，无需额外参数。
+type checkFieldRequest struct {
+	Rule    string      `json:"rule"` // 当前已填字段拼出的 JSON（或完整规则文本）
+	Field   string      `json:"field"`
+	Site    string      `json:"site"`
+	Samples []ai.Sample `json:"samples"`
+	Keyword string      `json:"keyword"`
+}
+
+// HandleCheckField 对单个字段做网页抓取/样本实测，返回 pass/fail/warn/skip 与证据。
+func HandleCheckField(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 POST"})
+		return
+	}
+	var request checkFieldRequest
+	if err := readJSON(w, r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体解析失败"})
+		return
+	}
+	ruleText := strings.TrimSpace(request.Rule)
+	if ruleText == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"findings": []verify.FieldFinding{{Field: request.Field, Status: "fail", Message: "还没有可验证的规则内容"}}})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	defer cancel()
+	target := []string{request.Field}
+	if strings.TrimSpace(request.Field) == "" {
+		target = nil // 空字段名 = 验证全部显式字段
+	}
+	findings := verify.CheckFields(ctx, verify.FieldOptions{
+		Rule:    ruleText,
+		Site:    request.Site,
+		Samples: request.Samples,
+		Keyword: request.Keyword,
+	}, target)
+	writeJSON(w, http.StatusOK, map[string]any{"findings": findings})
+}
+
+// HandleAIFixField 单字段 AI 纠正：带字段名/当前值/实测问题/样本，AI 只改这一个字段。
+type aiFixFieldRequest struct {
+	Site      string      `json:"site"`
+	Field     string      `json:"field"`
+	Value     string      `json:"value"`
+	Problem   string      `json:"problem"`
+	Samples   []ai.Sample `json:"samples"`
+	Notes     string      `json:"notes"`
+	Rule      string      `json:"rule"` // 当前规则文本（AI 输出与其合并后回传）
+	Keyword   string      `json:"keyword"`
+	BaseURL   string      `json:"baseUrl"`
+	APIKey    string      `json:"apiKey"`
+	Model     string      `json:"model"`
+	Timeout   int         `json:"timeout"`
+}
+
+// HandleAIFixField 调 AI 对单个字段核实纠正，返回该字段的新值。
+func HandleAIFixField(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 POST"})
+		return
+	}
+	var request aiFixFieldRequest
+	if err := readJSON(w, r, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体解析失败"})
+		return
+	}
+	cfg := ai.Config{
+		BaseURL: xbpq.FirstNonEmpty(request.BaseURL, os.Getenv("AI_BASE_URL")),
+		APIKey:  xbpq.FirstNonEmpty(request.APIKey, os.Getenv("AI_API_KEY")),
+		Model:   xbpq.FirstNonEmpty(request.Model, os.Getenv("AI_MODEL")),
+		Timeout: request.Timeout,
+	}
+	if cfg.Timeout <= 0 || cfg.Timeout > 90 {
+		cfg.Timeout = 90 // 闭环最多 2 次尝试，单次 AI 调用封顶 90s，避免撞穿 Vercel 300s
+	}
+	if cfg.BaseURL == "" || cfg.Model == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "缺少 AI 配置（baseUrl / model）"})
+		return
+	}
+	samples := request.Samples
+	if len(samples) == 0 && request.Site != "" {
+		probed, err := verify.Probe(r.Context(), request.Site, 0)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "站点样本抓取失败: " + err.Error()})
+			return
+		}
+		samples = probed
+	}
+	fingerprintText := fingerprint.Analyze(samples)
+
+	// 用界面当前规则作合并基底：AI 只回那个字段的值，我们覆盖回去再服务端回验。
+	baseRule := strings.TrimSpace(request.Rule)
+	if baseRule == "" {
+		baseRule = "{}"
+	}
+
+	problem := strings.TrimSpace(request.Problem)
+	currentValue := request.Value
+
+	// 闭环：AI 给值后，服务端用和「验证」完全相同的逐字段实测去回验；不通过就把
+	// 最新失败原因喂回 AI 再改，直到通过或耗尽次数。这样界面再点验证一定不会还是红。
+	const maxAttempts = 2
+	var lastRaw, lastProblem string
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		messages := ai.BuildFieldFixMessages(request.Site, request.Field, currentValue, problem, samples, request.Notes, fingerprintText)
+		content, err := ai.ChatCtx(r.Context(), cfg, messages)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		extracted := ExtractRule(content)
+		if extracted == "" {
+			lastRaw = content
+			if attempt < maxAttempts {
+				problem = "你返回的内容里没有合法 JSON，请只输出一个 {字段名: 值} 的 JSON 对象，不要解释、不要代码块"
+				continue
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "AI 返回内容里没有找到合法 JSON", "raw": content})
+			return
+		}
+		newValue := extractFieldFromJSON(extracted, request.Field)
+		if strings.TrimSpace(newValue) == "" {
+			lastRaw = content
+			if attempt < maxAttempts {
+				problem = "你返回的 JSON 里没有字段「" + request.Field + "」的值，请把它修正后的值写进这个字段"
+				continue
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "AI 没有给出字段「" + request.Field + "」的值", "raw": content})
+			return
+		}
+		// 服务端回验：把新值并入规则，跑一遍逐字段验证（与「验证」按钮同一套实测）。
+		candidate := replaceFieldInRule(baseRule, request.Field, newValue)
+		findings := verify.CheckFields(r.Context(), verify.FieldOptions{
+			Rule:    candidate,
+			Site:    request.Site,
+			Samples: samples,
+			Keyword: request.Keyword,
+		}, []string{request.Field})
+		if len(findings) == 0 {
+			// 没有对应层样本、回验被 skip：放行但明确提示用户再点验证确认。
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "field": request.Field, "value": newValue,
+				"note": "AI 已按网页源码更新该字段（服务端未能回验，请再点一次「验证」确认）"})
+			return
+		}
+		f := findings[0]
+		if f.Status == "pass" {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "field": request.Field, "value": newValue,
+				"note": "AI 已按网页源码核实，服务端回验通过"})
+			return
+		}
+		if f.Status == "warn" && attempt >= 2 {
+			// warn 不算标红，放行但带上提醒。
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "field": request.Field, "value": newValue,
+				"note": "AI 已更新（仅 warn：" + f.Message + "），可用"})
+			return
+		}
+		// fail，或 warn 还想再搏一次：把最新失败原因喂回 AI。
+		lastRaw = content
+		lastProblem = f.Message
+		problem = fmt.Sprintf("你刚给的「%s」值服务端回验仍【不通过】：%s。\n请回到下方网页源码，逐字确认锚点真的存在、start&&end 能截出正确内容，再给出能通过验证的写法。", request.Field, f.Message)
+		currentValue = newValue // 让 AI 看到上一轮它写出的内容，避免原地打转
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": false,
+		"error": "AI 多次修正仍不通过（最新问题：" + lastProblem + "）。建议：先修好该字段依赖的上一层字段（如 数组/播放数组/分类url），再回来点 AI 纠正。",
+		"raw":   lastRaw})
+}
+
+// ---- /api/gen-json ----
+
+// HandleGenJSON 把界面上逐字段填写的字段集【按字段字典顺序】统一生成源 JSON。
+// 这是「完成后统一按字段生成源 json」的出口：空值不写、别名归一、键序稳定。
+func HandleGenJSON(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 POST"})
+		return
+	}
+	var request struct {
+		Rule string `json:"rule"` // 前端已拼好的字段 JSON（含简写版临时模板覆盖字段）
+	}
+	if err := readJSON(w, r, &request); err != nil || strings.TrimSpace(request.Rule) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体解析失败或规则为空"})
+		return
+	}
+	// 表格可能只填了一部分字段（缺 主页url/分类url 时 ParseRule 会拒），
+	// 这里按“字段集合”直接解码 JSON，不走规则识别条件。
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(request.Rule)), &decoded); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "字段 JSON 无法解析：" + err.Error()})
+		return
+	}
+	fields := map[string]string{}
+	hasGarbled := false
+	for key, value := range decoded {
+		text := ""
+		switch typed := value.(type) {
+		case string:
+			text = typed
+		default:
+			body, err := json.Marshal(typed)
+			if err == nil {
+				text = string(body)
+			}
+		}
+		if strings.Contains(text, string(xbpq.ReplacementRune)) {
+			hasGarbled = true
+		}
+		text = xbpq.SanitizeValue(text)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		fields[xbpq.CanonicalFieldName(key)] = text
+	}
+	if len(fields) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "没有已填写的字段可生成"})
+		return
+	}
+	response := map[string]any{"ok": true, "json": xbpq.GenerateJSON(fields)}
+	if hasGarbled {
+		response["warning"] = "部分字段含乱码字符（已自动清除）；请核对相关锚点是否因样本抓取/解码不完整而残缺，必要时重新抓取样本再生成。"
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // ---- /api/verify ----
@@ -346,6 +684,10 @@ func RegisterAPI(mux *http.ServeMux) {
 	mux.HandleFunc("/api/probe", HandleProbe)
 	mux.HandleFunc("/api/generate", HandleGenerate)
 	mux.HandleFunc("/api/verify", HandleVerify)
+	mux.HandleFunc("/api/fields", HandleFields)
+	mux.HandleFunc("/api/check-field", HandleCheckField)
+	mux.HandleFunc("/api/ai-fix-field", HandleAIFixField)
+	mux.HandleFunc("/api/gen-json", HandleGenJSON)
 }
 
 func withCORS(next http.Handler) http.Handler {
