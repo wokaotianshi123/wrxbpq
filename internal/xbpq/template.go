@@ -42,7 +42,7 @@ var families = []templateFamily{
 		name:  "MacCMS新版mxone",
 		match: regexp.MustCompile(`(?i)/index-(?:\{cateId\}|[0-9])[^/"?]*\.html`),
 		fields: map[string]string{
-			"数组":   `class="module-item"><div class="module-item-cover"&&</div></div>||<div class="module-item"&&</div></div>`,
+			"数组":   `<div class="module-item"&&<div class="module-item"||class="module-item"><div class="module-item-cover"&&</div></div>||<div class="module-item"&&</div></div>||<li&&</li>`,
 			"标题":   `title="&&"`,
 			"副标题":  `class="module-item-text">&&</div>`,
 			"图片":   `data-src="&&"||data-original="&&"`,
