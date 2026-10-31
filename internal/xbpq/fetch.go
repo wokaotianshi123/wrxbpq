@@ -34,6 +34,9 @@ type Fetcher struct {
 	Client  *http.Client
 	Agent   string
 	Timeout int // 秒，<=0 用默认 20
+	// Headers 是规则「头部集合」解析出的附加请求头（Authorization / Cookie /
+	// 自定义 Referer …）。在 doOnce 里最后 Set，因此可覆盖内置同名头。
+	Headers map[string]string
 }
 
 // NewFetcher 构造一个抓取器。
@@ -52,6 +55,24 @@ func (f *Fetcher) timeout() int {
 		return f.Timeout
 	}
 	return 20
+}
+
+// WithHeaders 返回带附加请求头的副本（不改原 Fetcher），供播放阶段套用
+// 「播放请求头」而不污染目录/详情的抓取。
+func (f *Fetcher) WithHeaders(headers map[string]string) *Fetcher {
+	if len(headers) == 0 {
+		return f
+	}
+	next := *f
+	merged := make(map[string]string, len(f.Headers)+len(headers))
+	for name, value := range f.Headers {
+		merged[name] = value
+	}
+	for name, value := range headers {
+		merged[name] = value
+	}
+	next.Headers = merged
+	return &next
 }
 
 func (f *Fetcher) client() *http.Client {
@@ -149,6 +170,14 @@ func (f *Fetcher) doOnce(ctx context.Context, address, method, body, referer, ag
 	}
 	if method != "" {
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	// 规则 头部集合 / 播放请求头：最后 Set，同名键覆盖内置值
+	// （Authorization / Cookie / 自定义 Referer 都走这里）。
+	for name, value := range f.Headers {
+		if name == "" || value == "" {
+			continue
+		}
+		request.Header.Set(name, value)
 	}
 	response, err := f.client().Do(request)
 	if err != nil {

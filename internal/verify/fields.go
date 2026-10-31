@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/wrxbpq/wrxbpq/internal/ai"
@@ -260,6 +261,39 @@ func checkOneField(c fieldCheckCtx, name, value string) FieldFinding {
 			return pass("带该请求头抓首页成功", fmt.Sprintf("%d 字符", len(body)))
 		}
 		return FieldFinding{Field: name, Status: "warn", Message: "没有站点地址可实测，仅做语法检查", Evidence: ""}
+
+	case "头部集合", "请求头集合", "Headers":
+		headers := xbpq.ParseHeaderSet(value)
+		if len(headers) == 0 {
+			return fail("语法无法识别：按 Key$Value#Key$Value 填写（$ 可换 : 或 =，# 可换换行）；纯 UA 串请写进 请求头")
+		}
+		if base == "" {
+			return pass("语法正确（无站点地址，跳过实测）", headerNames(headers))
+		}
+		body, err := fetcher.WithHeaders(headers).Get(ctx, base, "")
+		if err != nil {
+			return fail("带该头部集合抓取首页失败：" + err.Error())
+		}
+		if len(body) < homeBodyMinLen {
+			return FieldFinding{Field: name, Status: "warn", Message: "带该头部集合抓首页返回过短，疑似风控页或凭据失效", Evidence: clipField(body, 120)}
+		}
+		return pass("带该头部集合抓首页成功", headerNames(headers))
+
+	case "播放请求头", "播放头部集合":
+		headers := xbpq.ParseHeaderSet(value)
+		if len(headers) == 0 {
+			return fail("语法无法识别：按 Key$Value#Key$Value 填写；CDN 校验 Referer 时至少要写 Referer$https://站点域名/")
+		}
+		merged := rule.PlayHeaders()
+		evidence := headerNames(merged)
+		if referer := xbpq.HeaderValue(merged, "Referer"); referer != "" {
+			evidence += "；播放 Referer=" + referer
+		}
+		if _, hasReferer := headers["Referer"]; !hasReferer && len(headers) > 0 {
+			// 没有 Referer 也能通过，只是提示一下常见用法
+			return pass("语法正确，取直链时生效（未指定 Referer，用播放页地址兜底）", evidence)
+		}
+		return pass("语法正确，取直链时生效", evidence)
 	}
 
 	// 搜索层字段没有离线搜索页样本可核（probe 不带搜索页），交由整表 search 步骤在线验证。
@@ -668,6 +702,16 @@ func checkDetailURL(ctx context.Context, fetcher *xbpq.Fetcher, rule xbpq.Rule, 
 		return FieldFinding{Field: name, Status: "warn", Message: "详情页返回过短，可能 404 软页或风控", Evidence: address}
 	}
 	return FieldFinding{Field: name, Status: "pass", Message: "回填真实 ID 打开详情页成功", Evidence: address + "（" + fmt.Sprintf("%d 字符", len(body)) + "）"}
+}
+
+// headerNames 把请求头集合拼成稳定顺序的展示串（证据用）。
+func headerNames(headers map[string]string) string {
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // checkSearchURL 拼关键词真实抓取，看能否截出结果。

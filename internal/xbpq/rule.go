@@ -8,6 +8,7 @@ package xbpq
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -238,6 +239,116 @@ func (r Rule) UserAgent() string {
 		return ""
 	}
 	return value
+}
+
+// ---- 自定义请求头 ----
+//
+// 规则字段（与 XBPQ jar、guoapp3 native/core/provider_xbpq.go 一致）：
+//
+//	头部集合   Key$Value#Key$Value   站点所有页面请求附加头（Authorization / Cookie / Referer …）
+//	播放请求头  同上                   取直链与播放阶段专用，同名键覆盖 头部集合
+//
+// 分隔符兼容：# 或换行或 ||；键值兼容 $ : = 三种写法。不含分隔符的裸串
+// （例如直接把 UA 写进 头部集合）会被忽略，UA 仍由 请求头 字段负责。
+
+var headerLineBreak = strings.NewReplacer("\r\n", "#", "\n", "#", "||", "#")
+
+// validHeaderName 头名必须是合法 token（字母数字与 -_），用来在 $ : = 三种
+// 键值写法里挑对分隔符——否则 "Referer=https://a.test/" 会被冒号误切成
+// name="Referer=https"。
+func validHeaderName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ParseHeaderSet 解析「头部集合 / 播放请求头」串。空串或无法识别时返回 nil。
+func ParseHeaderSet(raw string) map[string]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	headers := map[string]string{}
+	for _, entry := range strings.Split(headerLineBreak.Replace(raw), "#") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		var name, value string
+		found := false
+		for _, separator := range []string{"$", "：", ":", "="} {
+			head, tail, ok := strings.Cut(entry, separator)
+			if !ok || !validHeaderName(strings.TrimSpace(head)) {
+				continue
+			}
+			name, value, found = head, tail, true
+			break
+		}
+		if !found {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if value == "" || len(value) > 2048 {
+			continue
+		}
+		if strings.ContainsAny(value, "\r\n\x00") {
+			continue
+		}
+		headers[http.CanonicalHeaderKey(name)] = value
+	}
+	if len(headers) == 0 {
+		return nil
+	}
+	return headers
+}
+
+// Headers 站点级附加头（头部集合 / 请求头集合 / Headers）。
+func (r Rule) Headers() map[string]string {
+	return ParseHeaderSet(r.Field("头部集合", "请求头集合", "Headers"))
+}
+
+// PlayHeaders 播放阶段附加头：头部集合 + 播放请求头合并，后者优先。
+func (r Rule) PlayHeaders() map[string]string {
+	site := r.Headers()
+	play := ParseHeaderSet(r.Field("播放请求头", "播放头部集合"))
+	if len(site) == 0 && len(play) == 0 {
+		return nil
+	}
+	merged := make(map[string]string, len(site)+len(play))
+	for name, value := range site {
+		merged[name] = value
+	}
+	for name, value := range play {
+		merged[name] = value
+	}
+	return merged
+}
+
+// HeaderValue 大小写不敏感取某个头。
+func HeaderValue(headers map[string]string, name string) string {
+	for key, value := range headers {
+		if strings.EqualFold(key, name) {
+			return value
+		}
+	}
+	return ""
+}
+
+// PlayReferer 播放阶段的 Referer：规则写了就用规则的，否则回落默认值。
+func (r Rule) PlayReferer(fallback string) string {
+	if value := HeaderValue(r.PlayHeaders(), "Referer"); value != "" {
+		return value
+	}
+	return fallback
 }
 
 // ---- 分类 ----

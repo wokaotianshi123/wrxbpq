@@ -161,6 +161,8 @@ BaseURL 只写到 `/v1` 即可，程序会自动补 `/chat/completions`；写全
 ```
 主页url      站点首页（必填）
 请求头       UA
+头部集合     附加请求头：Authorization$Bearer xxx#X-Api-Key$k（登录态接口站必填）
+播放请求头   取直链专用头：Referer$https://站点域名/
 分类         "电影$1#电视剧$2"
 分类url      .../list/{cateId}-{catePg}.html
 搜索url      .../search?wd={wd}

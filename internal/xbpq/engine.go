@@ -54,7 +54,10 @@ func NewEngine(rule Rule, base string) *Engine {
 	if strings.TrimSpace(base) == "" {
 		base = rule.HomeURL()
 	}
-	return &Engine{Rule: rule, Base: base, Fetcher: NewFetcher(rule.UserAgent())}
+	fetcher := NewFetcher(rule.UserAgent())
+	// 规则 头部集合：目录/搜索/详情/播放页的抓取全都带上（Authorization 类的站必需）。
+	fetcher.Headers = rule.Headers()
+	return &Engine{Rule: rule, Base: base, Fetcher: fetcher}
 }
 
 // ---- 条目抽取 ----
@@ -699,12 +702,29 @@ func alternateRoutes(groups [][]episode, index int, main episode, mainLink, page
 // ---- 播放解析 ----
 
 // Resolve 解析一集的播放页，返回直链与可切换线路。
+// Resolve 取分集直链。解析失败且规则配了刷新令牌时，自动换新令牌重试一次
+// （令牌过期是接口型站源最常见的失败原因，且能自动修复）。
 func (e *Engine) Resolve(ctx context.Context, chapter Chapter) (Media, error) {
+	media, err := e.resolveWithRule(ctx, chapter)
+	if err == nil {
+		return media, nil
+	}
+	refreshed, ok := e.refreshAccessToken(ctx)
+	if !ok {
+		return Media{}, err
+	}
+	if retried, retryErr := e.withRule(refreshed).resolveWithRule(ctx, chapter); retryErr == nil {
+		return retried, nil
+	}
+	return Media{}, err
+}
+
+func (e *Engine) resolveWithRule(ctx context.Context, chapter Chapter) (Media, error) {
 	pageURL := strings.TrimSpace(chapter.PageURL)
 	if pageURL == "" {
 		return Media{}, fmt.Errorf("分集缺少播放页地址")
 	}
-	referer := e.Base + "/"
+	referer := e.Rule.PlayReferer(e.Base + "/")
 	media, err := e.resolveOne(ctx, pageURL, referer)
 	if err == nil {
 		media.Variants = e.resolveRoutes(ctx, chapter.Routes)
@@ -735,7 +755,10 @@ func (e *Engine) Resolve(ctx context.Context, chapter Chapter) (Media, error) {
 
 // resolveOne 单个播放页取直链。
 func (e *Engine) resolveOne(ctx context.Context, pageURL, referer string) (Media, error) {
-	body, err := e.Fetcher.Get(ctx, pageURL, referer)
+	fetcher := e.Fetcher.WithHeaders(e.Rule.PlayHeaders())
+	// 交给播放器的 Referer：规则指定优先，否则用播放页地址（CDN 只认有 Referer 的站）。
+	mediaReferer := e.Rule.PlayReferer(pageURL)
+	body, err := fetcher.Get(ctx, pageURL, referer)
 	if err != nil {
 		return Media{}, err
 	}
@@ -744,10 +767,10 @@ func (e *Engine) resolveOne(ctx context.Context, pageURL, referer string) (Media
 			candidate = JoinLink(pageURL, candidate)
 			candidate = NormalizePlaybackURL(candidate)
 			if IsHTTPMediaURL(candidate) && LooksLikeMedia(candidate) {
-				return Media{URL: candidate, Referer: pageURL}, nil
+				return Media{URL: candidate, Referer: mediaReferer}, nil
 			}
 			if strings.HasPrefix(candidate, "http") && !LooksLikeMedia(candidate) {
-				if second, secondErr := e.Fetcher.Get(ctx, candidate, pageURL); secondErr == nil {
+				if second, secondErr := fetcher.Get(ctx, candidate, pageURL); secondErr == nil {
 					if direct := jumpValue(second, jump); direct != "" {
 						direct = NormalizePlaybackURL(direct)
 						if IsHTTPMediaURL(direct) {
@@ -761,7 +784,7 @@ func (e *Engine) resolveOne(ctx context.Context, pageURL, referer string) (Media
 	if address := PlayerURL(body); address != "" {
 		address = NormalizePlaybackURL(address)
 		if IsHTTPMediaURL(address) {
-			return Media{URL: address, Referer: pageURL}, nil
+			return Media{URL: address, Referer: mediaReferer}, nil
 		}
 	}
 	return Media{}, fmt.Errorf("未解析到播放地址")
@@ -795,7 +818,7 @@ func (e *Engine) resolveRoutes(ctx context.Context, routes []string) []Media {
 			case <-ctx.Done():
 				return
 			}
-			got, err := e.resolveOne(ctx, address, e.Base+"/")
+			got, err := e.resolveOne(ctx, address, e.Rule.PlayReferer(e.Base+"/"))
 			if err != nil || got.URL == "" {
 				return
 			}
