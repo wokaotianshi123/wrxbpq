@@ -503,12 +503,46 @@ func RenderURL(template, base string, values map[string]string) string {
 	if err != nil || parsed.Host == "" {
 		return ""
 	}
-	if baseParsed, baseErr := url.Parse(base); baseErr == nil && baseParsed.Host != "" && parsed.Host != baseParsed.Host {
+	baseParsed, baseErr := url.Parse(base)
+	if baseErr != nil || baseParsed.Host == "" {
+		return template
+	}
+	// 站源地址本身是「加速前缀代理」（base 形如 https://proxy/https://real）时，
+	// 模板里的绝对地址要包进代理（proxy/https://real/path），而不是改写 host：
+	// 改写 host 会丢掉内嵌的真实站路径，且带 query 的地址（如 ?module=tags&action=keyword）
+	// 被 url.Parse 重组后会绕过代理直连超时。这里把模板的 scheme://host（即内嵌的真实站）
+	// 剥掉，只留 path+query 接到 base 后面，catalog / search 便统一走加速通道。
+	inner := proxyInnerBase(baseParsed)
+	if inner != "" && strings.HasPrefix(template, "http") && parsed.Host != baseParsed.Host {
+		if innerHost := strings.TrimPrefix(strings.TrimPrefix(inner, "https://"), "http://"); innerHost != "" {
+			innerHost = strings.SplitN(innerHost, "/", 2)[0]
+			if parsed.Host == innerHost {
+				return strings.TrimRight(base, "/") + strings.TrimPrefix(template[strings.Index(template, "://")+3:], innerHost)
+			}
+		}
+	}
+	if parsed.Host != baseParsed.Host {
 		parsed.Scheme = baseParsed.Scheme
 		parsed.Host = baseParsed.Host
 		template = parsed.String()
 	}
 	return template
+}
+
+// proxyInnerBase 从「加速前缀代理」base 里取出内嵌的真实站前缀。
+// 例：https://cfkua.wokaotianshi.eu.org/https://www.qinav.com → https://www.qinav.com
+// 非代理形态返回空串。
+func proxyInnerBase(base *url.URL) string {
+	if base == nil {
+		return ""
+	}
+	path := base.Path
+	for _, scheme := range []string{"https://", "http://"} {
+		if index := strings.Index(path, scheme); index >= 0 {
+			return path[index:]
+		}
+	}
+	return ""
 }
 
 // Absolute 把相对引用解析成绝对地址。
